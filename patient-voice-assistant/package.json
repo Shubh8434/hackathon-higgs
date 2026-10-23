@@ -1,0 +1,16 @@
+{
+  "name": "patient-voice-assistant",
+  "version": "1.0.0",
+  "description": "Voice assistant that books care and pre-empts slots for emergencies. Built on Boson AI Higgs Realtime, Avatar and TTS 3.",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "render-clips": "node scripts/render-clips.js",
+    "test": "node --test test/*.test.js"
+  }
+}
