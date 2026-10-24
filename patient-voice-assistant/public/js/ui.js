@@ -98,6 +98,8 @@ export function renderCards(s, doctor, holdRemainingMs) {
     time = booking.range || booking.label;
     const status = booking.emergency ? 'Earliest emergency slot' : s.hold ? `On hold · ${fmtCountdown(holdRemainingMs)}` : 'Confirmed';
     timeSub = [shortDate(booking), status].filter(Boolean).join(' · ');
+    if (s.change?.newSlot) timeSub = `Move to ${s.change.newSlot.range}?`;
+    else if (s.change) timeSub = 'Rescheduling: pick a new time';
   }
   else if (s.proposedSlotId && s.proposedLabel) {
     time = s.proposedLabel;
@@ -130,7 +132,7 @@ export function fmtCountdown(ms) {
 export function renderDoctors(snapshot, s, { onDoctor, onSlot }) {
   const list = $('#doctorList');
   list.innerHTML = '';
-  const disabled = s.mode === 'emergency' || Boolean(s.confirmed);
+  const disabled = s.mode === 'emergency' || (Boolean(s.confirmed) && !s.change);
   const recommended = s.specialty ? { general: 'patel', cardiology: 'chen', dermatology: 'lopez', orthopedics: 'kim', pediatrics: 'rahman' }[s.specialty] : null;
   for (const d of snapshot.doctors) {
     const btn = el('button', {
@@ -191,10 +193,13 @@ export function renderSchedule(snapshot, doctor) {
       body.append(el('tr', { className: 'day-row' }, el('td', { colSpan: 4, textContent: /^(today|tomorrow)$/.test(word) ? `${word[0].toUpperCase()}${word.slice(1)} · ${nice}` : nice })));
       lastDay = b.date || b.day;
     }
-    let tag = b.status === 'held' ? 'HELD' : 'CONFIRMED';
+    // Short labels so the column fits the narrow panel; full text on hover.
+    let tag = b.status === 'held' ? 'HELD' : 'BOOKED';
+    let full = b.status === 'held' ? 'On hold, awaiting payment' : 'Confirmed';
     let cls = b.status === 'held' ? 'tag-held' : 'tag-ok';
-    if (b.emergency) { tag = 'EMERGENCY'; cls = 'tag-emergency'; }
-    else if (b.displaced) { tag = `MOVED from ${formatTime(b.displacedFrom.time)}`; cls = 'tag-displaced'; }
+    if (b.emergency) { tag = 'ER'; full = b.triage === 'er-followup' ? 'Emergency: ER advised, priority follow-up' : 'Emergency: same-day priority slot'; cls = 'tag-emergency'; }
+    else if (b.displaced) { tag = 'MOVED'; full = `Moved from ${formatTime(b.displacedFrom.time)} by an emergency`; cls = 'tag-displaced'; }
+    else if (b.rescheduledFrom) { tag = 'MOVED'; full = 'Rescheduled by the patient'; cls = 'tag-ok'; }
 
     const prev = seenRows.get(b.id);
     let anim = '';
@@ -202,10 +207,11 @@ export function renderSchedule(snapshot, doctor) {
     else if (prev !== undefined && prev !== b.slotId) anim = 'row-displaced-in';
 
     const tr = el('tr', { className: `${b.emergency ? 'emergency' : ''} ${b.displaced ? 'displaced' : ''} ${anim}`.trim() },
-      el('td', { className: 'time', textContent: formatTime(b.time) }),
+      el('td', { className: 'time' }, formatTime(b.time),
+        el('div', { className: 'bid', textContent: b.id, title: 'Booking ID: say it to Ava to reschedule' })),
       el('td', { textContent: doctor(b.doctorId)?.short || b.doctorId }),
       el('td', { textContent: b.patient.name || (b.emergency ? 'Caller (details pending)' : 'Caller') }),
-      el('td', {}, el('span', { className: `tag ${cls}`, textContent: tag })),
+      el('td', {}, el('span', { className: `tag ${cls}`, textContent: tag, title: full })),
     );
     body.append(tr);
   }
@@ -226,31 +232,40 @@ export function renderSchedule(snapshot, doctor) {
 // Virtual phone: 2-3 most recent SMS to the caller
 // ---------------------------------------------------------------------------
 let lastSmsId = 0;
-export function renderPhone(snapshot) {
-  const msgs = snapshot.sms.filter((m) => m.to === 'patient').slice(-3);
+let lastSmsSig = null;
+let phoneDrawn = false; // no buzz on the very first draw
+// The phone shows only the latest acknowledgement sent to the patient since
+// `since` (page load or Reset demo); each new one replaces the previous.
+export function renderPhone(snapshot, since = 0) {
+  const mine = snapshot.sms.filter((m) => m.to === 'patient' && m.at >= since);
+  const msgs = mine.slice(-1);
   const list = $('#smsList');
   const newest = msgs.at(-1)?.id || 0;
-  if (newest === lastSmsId && list.childElementCount) return;
+  const sig = msgs.map((m) => m.id).join(',');
+  if (sig === lastSmsSig) return;
+  lastSmsSig = sig;
   list.innerHTML = '';
   if (!msgs.length) list.append(el('div', { className: 'sms-empty', textContent: 'No messages yet' }));
   for (const m of msgs) {
-    list.append(el('div', { className: `sms sms-${m.kind}${m.id > lastSmsId && lastSmsId ? ' sms-new' : ''}` },
+    list.append(el('div', { className: `sms sms-${m.kind}${m.id > lastSmsId && phoneDrawn ? ' sms-new' : ''}` },
       el('div', { className: 'sms-body', textContent: m.body }),
       el('div', { className: 'sms-time', textContent: new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })));
   }
-  if (newest > lastSmsId && lastSmsId) {
+  if (newest > lastSmsId && phoneDrawn) {
     $('#phone').classList.remove('buzz');
     void $('#phone').offsetWidth;
     $('#phone').classList.add('buzz');
   }
   lastSmsId = newest;
-  $('#phoneBadge').textContent = msgs.length ? String(snapshot.sms.filter((m) => m.to === 'patient').length) : '';
+  phoneDrawn = true;
+  $('#phoneBadge').textContent = msgs.length ? '1' : '';
 }
 
 export function resetRenderMemory() {
   seenRows.clear();
   scheduleSig = '';
   lastSmsId = 0;
+  lastSmsSig = null;
 }
 
 // ---------------------------------------------------------------------------

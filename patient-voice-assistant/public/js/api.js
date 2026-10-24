@@ -23,6 +23,7 @@ export const api = {
   hold: (slotId, reason, patient, meta) => call('POST', '/api/holds', { slotId, reason, patient, meta }),
   release: (id) => call('DELETE', `/api/holds/${encodeURIComponent(id)}`),
   pay: (id) => call('POST', `/api/bookings/${encodeURIComponent(id)}/pay`),
+  reschedule: (id, slotId) => call('POST', `/api/bookings/${encodeURIComponent(id)}/reschedule`, { slotId }),
   updatePatient: (id, patient) => call('PATCH', `/api/bookings/${encodeURIComponent(id)}`, { patient }),
   emergency: (doctorId, reason, patient, meta) => call('POST', '/api/emergency', { doctorId, reason, patient, meta }),
   clientSecret: (seconds) => call('POST', '/api/realtime/client-secret', { expires_after: { seconds } }),

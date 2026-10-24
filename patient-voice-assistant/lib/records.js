@@ -14,6 +14,7 @@ const STATUS = { held: 'held', released: 'released', expired: 'expired', confirm
 function slotOf(b, at) {
   return {
     date: b.date,
+    time: b.time, // "HH:MM", used to restore the booking into the live schedule
     day: dayWord(b.date, at),
     start: formatTime(b.time),
     end: formatTime(endTime(b.time)),
@@ -71,7 +72,12 @@ export function createBookingRecords({ file, now = () => Date.now() }) {
     r.patient = { name: b.patient?.name || r.patient.name, address: b.patient?.address || r.patient.address, phone: b.patient?.phone || r.patient.phone };
     if (STATUS[kind]) r.status = STATUS[kind];
     r.payment = { status: b.payment, amount: b.payment === 'paid' ? 40 : 0 };
-    if (kind === 'moved') r.slot = slotOf(b, now());
+    if (kind === 'moved' || kind === 'rescheduled') r.slot = slotOf(b, now());
+    if (kind === 'rescheduled') {
+      const doc = DOCTORS.find((d) => d.id === b.doctorId);
+      r.doctor = { id: doc.id, name: doc.name, title: doc.title };
+      (r.reschedules ||= []).push({ at: now(), from: extra.from, fromDoctor: extra.fromDoctor, to: extra.to });
+    }
     if (kind === 'confirmed' || kind === 'emergency') r.confirmedAt = now();
     if (extra.sms) r.sms.push({ at: now(), body: extra.sms });
     if (kind === 'emergency' && extra.displaced) r.emergency.preempted = extra.displaced;
@@ -83,6 +89,7 @@ export function createBookingRecords({ file, now = () => Date.now() }) {
       confirmed: 'Paid $40 copay, booking confirmed',
       emergency: `${b.triage === 'er-followup' ? 'ER advised; priority follow-up' : 'Same-day emergency slot'} ${r.slot.range} with ${r.doctor.name}${extra.displaced ? `; moved ${extra.displaced.patient || extra.displaced.bookingId} to ${extra.displaced.to}` : ''}`,
       moved: `Moved from ${extra.from} to ${extra.to}${extra.reason ? ` (${extra.reason})` : ''}`,
+      rescheduled: `Rescheduled by patient from ${extra.from}${extra.fromDoctor !== r.doctor.name ? ` (${extra.fromDoctor})` : ''} to ${extra.to} with ${r.doctor.name}`,
       details: `Updated ${(extra.changed || []).join(', ')}`,
     }[kind] || kind;
     r.history.push({ at: now(), event: kind, detail });
@@ -91,8 +98,42 @@ export function createBookingRecords({ file, now = () => Date.now() }) {
   }
 
   const list = () => Object.values(records).sort((a, b) => b.createdAt - a.createdAt);
+
+  // Confirmed bookings that haven't happened yet, newest first, in the shape
+  // the clinic schedule needs. Lets reset/restart keep real bookings.
+  function upcoming(nowMs = now()) {
+    const today = new Date(nowMs);
+    const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const nowMin = today.getHours() * 60 + today.getMinutes();
+    const to24 = (start) => {
+      const m = /^(\d{1,2}):(\d{2}) (AM|PM)$/.exec(start || '');
+      if (!m) return null;
+      const h = (Number(m[1]) % 12) + (m[3] === 'PM' ? 12 : 0);
+      return `${String(h).padStart(2, '0')}:${m[2]}`;
+    };
+    return Object.values(records)
+      .filter((r) => r.status === 'confirmed')
+      .map((r) => ({ r, time: r.slot.time || to24(r.slot.start) }))
+      .filter(({ r, time }) => time && (r.slot.date > todayIso || (r.slot.date === todayIso && Number(time.slice(0, 2)) * 60 + Number(time.slice(3)) > nowMin)))
+      .sort((a, b) => (b.r.confirmedAt || b.r.updatedAt) - (a.r.confirmedAt || a.r.updatedAt))
+      .map(({ r, time }) => ({
+        id: r.id,
+        doctorId: r.doctor.id,
+        date: r.slot.date,
+        time,
+        payment: r.payment.status,
+        emergency: r.type === 'emergency',
+        triage: r.emergency?.triage || undefined,
+        coveringFor: r.emergency?.coveringFor || undefined,
+        closedReason: r.emergency?.closedReason || undefined,
+        reason: r.problem,
+        patient: { ...r.patient },
+        meta: r.conversationId ? { conversationId: r.conversationId } : {},
+        createdAt: r.createdAt,
+      }));
+  }
   const get = (id) => records[id] || null;
   const has = (id) => Boolean(records[id]);
 
-  return { apply, list, get, has };
+  return { apply, list, get, has, upcoming };
 }

@@ -17,6 +17,7 @@ const WELCOME = "Hi, I'm Ava, your booking assistant. How can I help today?";
 
 const voice = new AssistantVoice();
 let clockOffset = 0; // server now - client now
+let smsSince = Infinity; // phone shows SMS sent after page load / Reset demo
 
 // ---------------------------------------------------------------------------
 // Orchestrator
@@ -47,22 +48,49 @@ let suppressUntil = 0; // drop the transcript of an injected demo phrase
 let pendingNudge = null; // { kind, reason: 'busy' | 'user-turn' }
 let userSpeaking = false;
 let paymentPause = false; // payment screen open: no patient input until Done / Release
-let pendingReply = false; // a patient turn is waiting for Ava's answer
 let replyFallback = null;
+let turnSeq = 0; // patient turns seen
+let answeredTurn = 0; // last turn Ava was asked to answer
 
 // Ava answers a patient turn only after the orchestrator has processed it and
 // her instructions carry the fresh state (see create_response: false).
-function requestReply() {
+// Retries until Higgs accepts, and re-asks if no response actually starts,
+// so a barge-in or a dropped request never leaves her silent.
+function requestReply(turn = turnSeq, tries = 0) {
   clearTimeout(replyFallback);
   if (!rt.connected || paymentPause) return;
+  if (turn <= answeredTurn || turn < turnSeq) return; // answered, or a newer turn took over
   syncInstructionsNow();
-  if (rt.reply()) pendingReply = false;
-  else pendingReply = true; // retried when the current response finishes
+  if (rt.reply()) {
+    answeredTurn = turn;
+    const sentAt = Date.now();
+    setTimeout(() => {
+      if (rt.lastCreatedAt < sentAt && turn === turnSeq && tries < 3) {
+        answeredTurn = turn - 1; // Higgs never started it: ask again
+        rt.requestedAt = 0;
+        requestReply(turn, tries + 1);
+      }
+    }, 4000);
+    return;
+  }
+  // Ava is still talking (or a request is in flight): try again shortly.
+  if (tries < 12) setTimeout(() => requestReply(turn, tries + 1), 1000);
 }
 
 // Reply once the orchestrator has finished every queued turn.
+function recoverAfterCancel(turn, tries = 0) {
+  setTimeout(() => {
+    if (!rt.connected || paymentPause || turn !== turnSeq) return; // a new sentence is being answered
+    if (rt.responseActive || userSpeaking) { if (tries < 5) recoverAfterCancel(turn, tries + 1); return; }
+    answeredTurn = turn - 1;
+    requestReply(turn);
+  }, 2500);
+}
+
 function replyAfterTurn() {
-  orch.busy.then(requestReply, requestReply);
+  const turn = ++turnSeq;
+  const go = () => requestReply(turn);
+  orch.busy.then(go, go);
 }
 
 function dropUserBubble() {
@@ -76,7 +104,9 @@ const rt = new RealtimeSession({
     userSpeaking = false;
     // If no transcript arrives (STT hiccup), still answer what was heard.
     clearTimeout(replyFallback);
-    if (userText.trim()) replyFallback = setTimeout(() => { if (!rt.responseActive) requestReply(); }, 5000);
+    if (userText.trim()) replyFallback = setTimeout(() => { if (!rt.responseActive) replyAfterTurn(); }, 5000);
+    // Noise picked up as speech: drop the empty "…" bubble.
+    else setTimeout(() => { if (userBubble && !userText.trim()) { userBubble.remove(); userBubble = null; } }, 3000);
   },
   onSpeechStarted: () => {
     if (paymentPause) return;
@@ -119,15 +149,28 @@ const rt = new RealtimeSession({
     if (!assistantBubble) assistantBubble = addBubble('assistant', '', { pending: true });
     updateBubble(assistantBubble, rt.assistantText);
   },
-  onResponseDone: (text) => {
+  onResponseDone: (text, status) => {
+    if (status === 'cancelled') {
+      // Cut off by barge-in, or by noise mistaken for speech. If no real
+      // patient sentence follows, Ava answers the last turn again. Kept in the
+      // history (badge "cut off") so lost replies can be diagnosed.
+      if (assistantBubble) {
+        if (text.trim()) { updateBubble(assistantBubble, text, { pending: false }); assistantBubble.classList.add('cutoff'); }
+        else assistantBubble.remove();
+        assistantBubble = null;
+      }
+      if (text.trim()) logMessage('assistant', text, 'cut off');
+      recoverAfterCancel(turnSeq);
+      return;
+    }
     if (assistantBubble) updateBubble(assistantBubble, text, { pending: false });
     assistantBubble = null;
     logMessage('assistant', text);
     orch.handleAssistant(text);
-    if (pendingReply) {
-      pendingReply = false;
+    // A patient turn arrived while Ava was talking: answer it now.
+    if (turnSeq > answeredTurn) {
       pendingNudge = null;
-      setTimeout(replyAfterTurn, 200);
+      setTimeout(() => requestReply(turnSeq), 200);
       return;
     }
     if (pendingNudge) {
@@ -361,7 +404,7 @@ function render() {
     onSlot: (id) => orch.selectSlot(id),
   });
   renderSchedule(snap, doctorById);
-  renderPhone(snap);
+  renderPhone(snap, smsSince);
   renderEmergency(s, doctorById);
   renderDetails(s);
   renderPayment(s, doctorById, holdRemaining());
@@ -415,7 +458,7 @@ function drawCalendar() {
   const s = orch.s;
   renderCalendar(cal.data, {
     selectedDate: cal.date,
-    disabled: s.mode === 'emergency' || Boolean(s.confirmed) || paymentPause,
+    disabled: s.mode === 'emergency' || (Boolean(s.confirmed) && !s.change) || paymentPause,
     onDay: (date) => { cal.date = date; drawCalendar(); },
     onSlot: (id) => orch.selectSlot(id),
   });
@@ -521,6 +564,7 @@ async function poll() {
   try {
     const snap = await api.state();
     clockOffset = snap.now - Date.now();
+    if (smsSince === Infinity) smsSince = snap.now; // first load: start with an empty phone
     orch.applyState(snap);
   } catch {}
 }
@@ -551,6 +595,7 @@ function bind() {
     pendingNudge = null;
     startNewConversation();
     cal.manual = false;
+    smsSince = Date.now() + clockOffset;
     await orch.reset();
     syncInstructionsNow();
   });

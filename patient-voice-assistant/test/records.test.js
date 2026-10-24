@@ -41,3 +41,38 @@ test('records: emergencies note the pre-empted booking; seeded bookings are not 
   assert.equal(r.emergency.preempted.patient, 'Robert Hall');
   assert.equal(records.list().length, 1);
 });
+
+test('records: a reschedule updates the slot and keeps a history', () => {
+  const { records, db } = setup();
+  const [a, b] = db.freeSlots('patel', { limit: 2 });
+  const held = db.hold({ slotId: a.id, reason: 'cold' });
+  db.pay(held.id);
+  db.reschedule(held.id, b.id);
+  const r = records.get(held.id);
+  assert.equal(r.slot.date, b.date);
+  assert.equal(r.reschedules.length, 1);
+  assert.deepEqual(r.history.map((h) => h.event), ['held', 'confirmed', 'rescheduled']);
+});
+
+test('records: confirmed upcoming bookings are restored into the schedule on reset/restart', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pva-rec-')), 'bookings.json');
+  let records = createBookingRecords({ file });
+  let db = createDb({ onRecord: records.apply, idTaken: records.has, restore: (n) => records.upcoming(n) });
+  const [slot] = db.freeSlots('lopez', { limit: 1 });
+  const held = db.hold({ slotId: slot.id, reason: 'rash', patient: { name: 'Ana Diaz', phone: '(647) 555-0123' } });
+  db.pay(held.id);
+  const released = db.hold({ slotId: db.freeSlots('lopez', { limit: 1 })[0].id });
+  db.release(released.id);
+
+  db.reset(); // Reset demo keeps it
+  assert.equal(db.get(held.id)?.slotId, slot.id);
+  assert.equal(db.get(released.id), undefined, 'released holds are not restored');
+
+  records = createBookingRecords({ file }); // server restart
+  db = createDb({ onRecord: records.apply, idTaken: records.has, restore: (n) => records.upcoming(n) });
+  const back = db.get(held.id);
+  assert.equal(back.slotId, slot.id);
+  assert.equal(back.payment, 'paid');
+  assert.equal(back.patient.phone, '(647) 555-0123');
+  assert.ok(db.reschedule(held.id, db.freeSlots('lopez', { limit: 1 })[0].id));
+});

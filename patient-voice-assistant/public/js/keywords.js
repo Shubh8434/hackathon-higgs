@@ -301,6 +301,28 @@ export function isConfirmation(text) {
   return /\b(?:yes|yeah|yep|yup|ya|sure|okay|ok|sounds good|that works|works for me|perfect|book it|go ahead|please do|confirm|let'?s do (?:it|that)|great|correct|that'?s right|right|all good|looks good|exactly|uh[- ]?huh|mm[- ]?hmm)\b/.test(t);
 }
 
+// "I want to reschedule", "can I move my appointment", "change my booking"
+export function isRescheduleIntent(text) {
+  const t = norm(text);
+  return /\bre-?schedul\w*|\bpostpone\b/.test(t)
+    || /\b(?:change|move|shift|switch|push back|bring forward)\b.{0,25}\b(?:my |the |this |that )?(?:appointment|booking|visit)\b/.test(t);
+}
+
+// "never mind", "keep it", "leave it as it is"
+export function isCancelChange(text) {
+  return /\b(?:never ?mind|forget it|keep (?:it|my appointment|the (?:same|original|current)(?: time| one)?)|leave it(?: as it is)?|no change|don'?t (?:change|move|reschedule) it|stay as it is)\b/.test(norm(text));
+}
+
+// Booking IDs as spoken/typed: "PVA-965W", "P V A nine six five W", "p.v.a 965 w".
+export function extractBookingId(text) {
+  const words = { zero: '0', oh: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
+  const t = norm(text).replace(/\b(zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/g, (w) => words[w]);
+  const m = /\b(p[\s.-]*v[\s.-]*a|e[\s.-]*r)[\s.-]*((?:[a-z0-9][\s.-]*){4})(?![a-z0-9])/.exec(t);
+  if (!m) return null;
+  const prefix = m[1].replace(/[^a-z]/g, '').toUpperCase();
+  return `${prefix}-${m[2].replace(/[^a-z0-9]/g, '').toUpperCase()}`;
+}
+
 export function isBookingIntent(text) {
   return /\b(?:book|appointment|schedule|see (?:a|the) doctor|check ?-?up|visit|consult)\b/.test(norm(text));
 }
@@ -414,7 +436,9 @@ export function extractDetails(text, expecting = null) {
   // Asked for a name but got something with numbers in it: that's the address.
   if (!address && expecting === 'name' && !phone) {
     const guess = cleanAddress(text);
-    if (/\d/.test(guess) && guess.split(/\s+/).length >= 2) address = guess;
+    // …unless the numbers are a time ("3 p.m. would be good").
+    const words = guess.split(/\s+/).length;
+    if (/\d/.test(guess) && words >= 2 && words <= 8 && !parseTimes(text).length && !/\b[ap]\.?m\b|o'?clock/i.test(text)) address = guess;
   }
   if (address) out.address = address;
   // While asking for address/phone, only an explicit "my name is" changes the

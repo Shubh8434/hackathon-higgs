@@ -35,6 +35,8 @@ export class RealtimeSession {
     this.voice = 'default';
     this.responseActive = false;
     this.requestedAt = 0; // a response.create is in flight (until response.created)
+    this.lastCreatedAt = 0;
+    this.lastResponseAt = 0;
     this.assistantText = '';
   }
 
@@ -146,7 +148,10 @@ export class RealtimeSession {
 
   // Answer the patient's last turn (instructions must already be up to date).
   reply() {
-    if (!this.connected || this.responseActive || Date.now() - this.requestedAt < 4000) return false;
+    // A response that went quiet for 12 s without finishing (e.g. cut off by
+    // barge-in with no response.done) shouldn't block Ava forever.
+    if (this.responseActive && Date.now() - this.lastResponseAt > 12000) this.responseActive = false;
+    if (!this.connected || this.responseActive || Date.now() - this.requestedAt < 2500) return false;
     this.requestedAt = Date.now();
     this.send({ type: 'response.create' });
     return true;
@@ -199,6 +204,8 @@ export class RealtimeSession {
 
       case 'response.created':
         this.requestedAt = 0;
+        this.lastCreatedAt = Date.now();
+        this.lastResponseAt = Date.now();
         this.responseActive = true;
         this.assistantText = '';
         this.emit('onResponseStart');
@@ -206,6 +213,7 @@ export class RealtimeSession {
 
       case 'response.output_audio.delta':
       case 'response.audio.delta':
+        this.lastResponseAt = Date.now();
         if (msg.delta) this.playChunk(msg.delta);
         break;
 
@@ -218,8 +226,9 @@ export class RealtimeSession {
         break;
 
       case 'response.done':
+      case 'response.cancelled':
         this.responseActive = false;
-        this.emit('onResponseDone', this.assistantText);
+        this.emit('onResponseDone', this.assistantText, msg.type === 'response.cancelled' ? 'cancelled' : msg.response?.status);
         break;
 
       case 'error':

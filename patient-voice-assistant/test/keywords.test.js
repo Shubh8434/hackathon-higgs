@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
-  parseTimes, matchSlot, parseDate, parseDayPart, parseTimeConstraint, isQuestion, dayFocus, isConfirmation, isBookingIntent, extractPhone, extractAddress,
+  parseTimes, matchSlot, parseDate, parseDayPart, parseTimeConstraint, isQuestion, dayFocus, isRescheduleIntent, isCancelChange, extractBookingId, isConfirmation, isBookingIntent, extractPhone, extractAddress,
   extractName, extractDetails, highlightSegments, parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, isAddressFollowUp,
 } from '../public/js/keywords.js';
 
@@ -242,4 +242,20 @@ test('dislocations are emergencies routed to orthopedics', () => {
   assert.ok(detectRedFlag('my shoulder popped out of its socket'));
   assert.equal(emergencyDoctorFor('I have a hip dislocation'), 'kim');
   assert.equal(emergencyDoctorFor('Oh God! I think I have a hip and major joint dislocations.. But I think I am feeling very emergency condition'), 'kim');
+});
+
+test('rescheduling: intent, never-mind, and booking IDs from speech', () => {
+  assert.ok(isRescheduleIntent('I want to reschedule my appointment'));
+  assert.ok(isRescheduleIntent('Can I move my booking to Friday?'));
+  assert.equal(isRescheduleIntent("I'd like to book a routine checkup"), false);
+  assert.ok(isCancelChange('never mind, keep it'));
+  assert.equal(isCancelChange('yes please'), false);
+  assert.equal(extractBookingId('My booking ID is PVA-965W'), 'PVA-965W');
+  assert.equal(extractBookingId('p v a nine six five w'), 'PVA-965W');
+  assert.equal(extractBookingId('however this is fine'), null);
+});
+
+test('details: a time given while a name is expected is not an address', () => {
+  assert.equal(extractDetails('I think for me, 3 p.m. would be good time. Hello.', 'name').address, undefined);
+  assert.equal(extractDetails('Street East one two three', 'name').address, 'Street East 123');
 });

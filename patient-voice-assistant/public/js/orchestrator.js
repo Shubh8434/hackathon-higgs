@@ -11,7 +11,8 @@ import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
   parseTimes, matchSlot, isConfirmation, isBookingIntent, isPaymentDone, extractDetails,
   parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, cleanAddress, isAddressFollowUp,
-  parseDate, parseDayPart, isoDate, parseTimeConstraint, isQuestion, dayFocus, SPECIALTY_DOCTOR,
+  parseDate, parseDayPart, isoDate, parseTimeConstraint, isQuestion, dayFocus,
+  isRescheduleIntent, isCancelChange, extractBookingId, SPECIALTY_DOCTOR,
 } from './keywords.js';
 
 const FIELDS = ['name', 'address', 'phone'];
@@ -31,6 +32,7 @@ function fresh() {
     doctorSource: null,
     proposedSlotId: null,
     offeredSlots: [], // the times Ava last listed: [{ id, time, date, label }]
+    change: null, // rescheduling a confirmed booking: { stage: 'find'|'pick'|'confirm', booking, doctorId, newSlot }
     proposedLabel: '',
     hold: null,
     confirmed: null,
@@ -180,6 +182,179 @@ export class Orchestrator {
     return true;
   }
 
+  // ---- Rescheduling a confirmed booking ------------------------------------
+  // "Can we move it to Friday?" right after booking.
+  wantsMove(text) {
+    const now = this.now();
+    return /\b(?:move|change|switch|instead|different|another|earlier|later)\b/i.test(text)
+      && Boolean(parseDate(text, now) || parseTimes(text, now).length || parseDayPart(text));
+  }
+
+  slotFromId(id) {
+    const [doctorId, date, time] = id.split('|');
+    return { id, doctorId, date, time, label: `${formatTime(time)} ${this.onDay(date)}` };
+  }
+
+  rangeOf(date, time) {
+    const [h, m] = time.split(':').map(Number);
+    const end = h * 60 + m + 30;
+    return `${formatTime(time)} to ${formatTime(`${Math.floor(end / 60)}:${String(end % 60).padStart(2, '0')}`)} ${this.onDay(date)}`;
+  }
+
+  // A confirmed booking by ID ("P V A 9 6 5 W") or by the phone it was booked with.
+  findBooking(text) {
+    const all = (this.snapshot?.bookings || []).filter((b) => b.status === 'confirmed');
+    const id = extractBookingId(text);
+    if (id) return { match: all.find((b) => b.id === id) || null, by: 'ID', key: id };
+    const digits = phoneDigits(text);
+    if (digits.length >= 10) {
+      const want = digits.slice(-10);
+      return { match: all.find((b) => phoneDigits(b.patient?.phone || '').slice(-10) === want) || null, by: 'phone number', key: formatPhone(want) };
+    }
+    return null;
+  }
+
+  async startChange(text) {
+    const s = this.s;
+    const own = s.confirmed && !s.confirmed.emergency
+      ? this.snapshot?.bookings.find((b) => b.id === s.confirmed.id) || s.confirmed : null;
+    const found = this.findBooking(text);
+    const booking = found?.match || own;
+    if (!booking) {
+      s.change = { stage: 'find' };
+      s.awaiting = 'reschedule';
+      this.changed();
+      if (found) return this.respond(`Sorry, I couldn't find a booking with ${found.by} ${found.key}. Could you check it and say it again?`);
+      return this.respond("Sure, I can help you reschedule. What's your booking ID, or the phone number you booked with?");
+    }
+    return this.beginPick(booking, text);
+  }
+
+  async beginPick(booking, text = '') {
+    const s = this.s;
+    if (booking.emergency) {
+      s.change = null;
+      return this.respond(`Booking ${booking.id} is an emergency booking, so it can't be moved here. Please call the clinic and they'll help right away.`);
+    }
+    Object.assign(s, { focusDate: null, offeredSlots: [], timePref: null, proposedSlotId: null, proposedLabel: '' });
+    this.setDoctor(booking.doctorId, 'reschedule');
+    s.change = { stage: 'pick', booking, doctorId: booking.doctorId, newSlot: null };
+    s.awaiting = 'reschedule';
+    if (!s.patient.name) s.patient = { name: '', address: '', phone: '', ...booking.patient };
+    const intro = `I found your appointment with ${this.doctor(booking.doctorId).name}, ${booking.range}.`;
+    // They may have said the new time already: "move it to Friday at 10".
+    const line = await this.changePickLine(text);
+    return this.respond(`${intro} ${line || `What day or time would you like instead? ${this.offerTimes(booking.doctorId)}`}`);
+  }
+
+  // The reply for a "which new time?" turn, or null if no day/time/choice was given.
+  async changePickLine(text) {
+    const s = this.s;
+    const c = s.change;
+    const now = this.now();
+    const doc = detectDoctor(text);
+    let switched = false;
+    if (doc && doc !== c.doctorId) {
+      c.doctorId = doc;
+      this.setDoctor(doc, 'reschedule');
+      s.awaiting = 'reschedule';
+      switched = true;
+    }
+    const date = parseDate(text, now);
+    const { part, constraint } = this.timePref(text, date);
+    if (date) s.focusDate = date;
+    const times = parseTimeConstraint(text) ? [] : parseTimes(text, now);
+    if (times.length) {
+      const slot = matchSlot(times, await this.slotPool(c.doctorId, date));
+      if (slot && slot.id !== c.booking.slotId) return this.confirmChangeLine(slot);
+      const day = date || s.focusDate;
+      return `Sorry, ${formatTime(times[0].time)}${day ? ` ${this.onDay(day)}` : ''} isn't available with ${this.doctor(c.doctorId).short}. ${await this.offerFor(c.doctorId, { date: day, part })}`;
+    }
+    const choice = parseChoice(text);
+    const pick = choice !== null ? this.offeredSlots(c.doctorId).at(choice) : null;
+    if (pick) return this.confirmChangeLine(pick);
+    if (date || part || constraint || switched) {
+      return `${switched ? `${this.doctor(c.doctorId).name} it is. ` : ''}${await this.offerFor(c.doctorId, { date, part, constraint })}`;
+    }
+    return null;
+  }
+
+  // "PVA-ASH2" → "P V A, A S H 2" so Ava reads it the way patients say it.
+  spellId(id) {
+    const [a, b] = id.split('-');
+    return `${a.split('').join(' ')}, ${(b || '').split('').join(' ')}`;
+  }
+
+  confirmChangeLine(slot) {
+    const c = this.s.change;
+    const doctorId = slot.doctorId || c.doctorId;
+    c.stage = 'confirm';
+    c.newSlot = { id: slot.id, doctorId, date: slot.date, time: slot.time, range: this.rangeOf(slot.date, slot.time) };
+    this.changed();
+    const other = doctorId !== c.booking.doctorId ? ` with ${this.doctor(doctorId).name}` : '';
+    return `Just to confirm: move your appointment from ${c.booking.range} to ${c.newSlot.range}${other}?`;
+  }
+
+  async changeTurn(text) {
+    const s = this.s;
+    const c = s.change;
+    if (isCancelChange(text)) {
+      s.change = null;
+      s.awaiting = 'done';
+      this.changed();
+      return this.respond(c.booking ? `No problem, your appointment stays ${c.booking.range}. Is there anything else I can help with?` : 'No problem. Is there anything else I can help with?');
+    }
+    // Booking ID said again after it was found: confirm it's the same one
+    // (or switch if it's a different booking), then carry on.
+    const saidId = c.booking && extractBookingId(text);
+    if (saidId) {
+      if (saidId === c.booking.id) {
+        const rest = await this.changePickLine(text);
+        return this.respond(`Yes, that's the one: booking ${this.spellId(c.booking.id)}, ${c.booking.range}. ${rest || `Which day or time would you like instead? ${this.offerTimes(c.doctorId)}`}`);
+      }
+      const other = this.findBooking(text);
+      if (other?.match) return this.beginPick(other.match, text);
+      return this.respond(`I couldn't find ${this.spellId(saidId)}, but I do have your booking ${this.spellId(c.booking.id)}, ${c.booking.range}. Which day or time would you like instead?`);
+    }
+    if (c.stage === 'find') {
+      const found = this.findBooking(text);
+      if (found?.match) return this.beginPick(found.match);
+      if (found) return this.respond(`Sorry, I couldn't find a booking with ${found.by} ${found.key}. Could you check it and say it again?`);
+      return this.respond('I need the booking ID from your text message, like P V A followed by four characters, or the phone number you booked with.');
+    }
+    if (c.stage === 'confirm') {
+      if (isConfirmation(text)) return this.applyChange();
+      const line = await this.changePickLine(text);
+      if (line) return this.respond(line);
+      if (/\b(?:no|nope|not)\b/i.test(text)) {
+        c.stage = 'pick';
+        c.newSlot = null;
+        this.changed();
+        return this.respond(`No problem. Which day or time would you prefer? ${this.offerTimes(c.doctorId)}`);
+      }
+      return this.respond(`Should I move your appointment to ${c.newSlot.range}? Please say yes or no.`);
+    }
+    const line = await this.changePickLine(text);
+    return this.respond(line || `Which day or time would you like instead? ${this.offerTimes(c.doctorId)}`);
+  }
+
+  async applyChange() {
+    const s = this.s;
+    const c = s.change;
+    try {
+      const res = await api.reschedule(c.booking.id, c.newSlot.id);
+      Object.assign(s, { confirmed: res.booking, change: null, awaiting: 'done', doctorId: res.booking.doctorId });
+      this.applyState(res.state);
+      const d = this.doctor(res.booking.doctorId);
+      this.respond(`Done. Your appointment is now ${res.booking.range} with ${d.name}. Your booking ID stays ${res.booking.id}, and I've texted you the new time.`);
+    } catch (err) {
+      c.stage = 'pick';
+      c.newSlot = null;
+      await this.refresh();
+      this.respond(`${err.message} ${this.offerTimes(c.doctorId)}`);
+    }
+  }
+
   // A time the patient asked about: confirm before holding it.
   propose(slot) {
     Object.assign(this.s, { proposedSlotId: slot.id, proposedLabel: slot.label });
@@ -201,6 +376,8 @@ export class Orchestrator {
       if (!(explicit && (date || constraint || parseDayPart(text)))) return false;
     }
     const times = parseTimes(text, now);
+    // Repeating the time that's already held is not a change.
+    if (times.length && times[0].time === s.hold.time && (!date || date === s.hold.date)) return false;
     if (date) s.focusDate = date;
     if (times.length && !parseTimeConstraint(text)) {
       const pool = await this.slotPool(s.doctorId, date);
@@ -299,6 +476,8 @@ export class Orchestrator {
     }
     if (s.hold && s.awaiting === 'confirm') return this.confirmTurn(text);
     if (s.hold && isPaymentDone(text)) return this.payNow();
+    if (s.change) return this.changeTurn(text);
+    if (!s.hold && (isRescheduleIntent(text) || (s.confirmed && this.wantsMove(text)))) return this.startChange(text);
 
     const spec = detectSpecialty(text);
     const doc = detectDoctor(text);
@@ -368,6 +547,7 @@ export class Orchestrator {
     return this.queue(async () => {
       if (this.s.mode === 'emergency') return;
       this.setDoctor(id, 'screen');
+      if (this.s.change?.booking) { Object.assign(this.s.change, { doctorId: id, stage: 'pick', newSlot: null }); this.s.awaiting = 'reschedule'; }
       // Silent: the screen shows the doctor's times. The line only goes into
       // Ava's instructions, for whenever the patient speaks next.
       this.s.reply = await this.offerLine(id, false);
@@ -376,7 +556,11 @@ export class Orchestrator {
   }
 
   selectSlot(slotId) {
-    return this.queue(() => (this.s.mode === 'emergency' ? null : this.placeHold(slotId, 'screen')));
+    return this.queue(() => {
+      if (this.s.mode === 'emergency') return null;
+      if (this.s.change?.booking) return this.respond(this.confirmChangeLine(this.slotFromId(slotId)), { nudge: true });
+      return this.placeHold(slotId, 'screen');
+    });
   }
 
   setDoctor(id, source) {
@@ -480,13 +664,19 @@ export class Orchestrator {
     const found = extractDetails(text, symptomatic ? null : s.awaiting);
     if (s.awaiting === 'phone' && !found.phone) {
       const digits = phoneDigits(text);
+      const spaced = (d) => d.split('').join(' ');
       if (digits) {
         s.phoneBuffer += digits;
         if (s.phoneBuffer.length < 10) {
-          if (!this.hooks.isLive()) this.respond('Got it, go on.');
-          return;
+          // Probably mid-number ("six four seven…"): tell Ava to wait for the rest.
+          return this.respond(`Got ${spaced(s.phoneBuffer)}. Please go on with the rest of the number.`);
         }
         found.phone = formatPhone(s.phoneBuffer.slice(0, 15));
+      } else if (s.phoneBuffer) {
+        // They stopped short ("yep") with fewer than 10 digits.
+        const have = s.phoneBuffer;
+        s.phoneBuffer = '';
+        return this.respond(`I only got ${have.length} digits, ${spaced(have)}. A phone number has 10 digits. Could you say the full number again?`);
       }
     }
     const changed = await this.savePatient(found);
@@ -596,6 +786,7 @@ export class Orchestrator {
         const flag = detectModelEmergency(text);
         if (flag) return this.triggerEmergency('model', flag, s.lastUserText || text);
       }
+      if (s.change) return; // rescheduling is driven by the screen, not parsed from Ava
       const normalHold = s.mode !== 'emergency' && s.hold;
       if (s.mode === 'emergency' || normalHold) {
         // Ava's read-back wins over our own transcript parsing.
@@ -612,6 +803,13 @@ export class Orchestrator {
           const next = FIELDS.includes(s.awaiting) ? ASK[s.awaiting] : this.detailsWrapUp();
           return this.respond(`Actually, the address you gave is all I need. ${next}`, { nudge: true });
         }
+      }
+      // Ava jumped to the final check or the payment screen while a detail is
+      // still missing (e.g. a 6-digit phone number): pull her back.
+      if (this.collectingDetails() && (isPayPrompt(text) || /\bfinal check\b|\bis (?:that|this) all correct\b|payment screen/i.test(text))) {
+        const missing = s.awaiting;
+        const why = missing === 'phone' && s.phoneBuffer ? `I only have ${s.phoneBuffer.length} digits of your phone number. ` : '';
+        return this.respond(`Sorry, I'm not quite done. ${why}${ASK[missing]}`, { nudge: true });
       }
       // Ava named a time for the hold/booking: it must match the screen.
       if (s.mode !== 'emergency' && !s.confirmed && s.doctorId) {
@@ -675,7 +873,8 @@ export class Orchestrator {
       `CURRENT DATE AND TIME: ${nowText} (clinic local time). Use this for everything about dates: "today", "tomorrow" and weekday names are relative to it.`,
       `CLINIC HOURS: ${this.snapshot?.clinicHours || 'Monday to Friday, 9 AM to 12 PM and 2 PM to 4 PM'}. Appointments are 30 minutes.`,
       'RULE: Always have the patient describe their problem first, then book. Recommend the doctor whose specialty fits, offer up to three of their NEAREST open times from now (never list more than three times in one turn) (the lists below are sorted soonest first), and let the patient pick. Never offer a time in the past, on a Sunday, or one that is not listed. Saturdays are normal working days. The OPEN TIMES list is the only truth about availability: a weekday is open if it appears there. Never say a doctor or the clinic is "closed on Wednesdays" (or any weekday); if a specific date is missing from the list, say that date has no open times. Never say you are holding or booking a time unless the NEXT LINE says so. If the patient asks for a particular day, the morning/afternoon, or "after/before" a time, only offer open times that match; if none match, say so and offer the nearest alternatives. When the patient gives only a time ("3:30 then"), it means the day you were just discussing. A question like "do you have anything after 3?" is NOT a choice: never hold a time until the patient picks one. If the patient wants a different day or time after you are holding one, offer alternatives; the screen moves the hold when they pick, and their details are kept. Say days relative to today ("tomorrow", "on Monday") and add the date when it is more than a week away.',
-      'When the patient picks a time, say you are holding it for them and give the appointment as a 30-minute range (for example "11:00 AM to 11:30 AM today"); never mention how long the hold lasts. Then collect their full name, home address and phone number, one question at a time. Accept the address exactly as the patient says it: never ask for a city, province, postal code or unit. After all three are collected, do a final check: read them back in this form: "Just a final check: your name is ..., your address is ..., and your phone number is ... Is that all correct?" (phone as digits). If the patient corrects something, update it and read all three back again. Only when the patient says yes, tell them the payment screen is open and to tap Done to confirm (or Release hold for a different time); then stay quiet until the screen reports what they tapped. Never invent booking IDs, prices or times that are not listed below; the screen shows IDs.',
+      'When the patient picks a time for a NEW booking, say you are holding it for them and give the appointment as a 30-minute range (for example "11:00 AM to 11:30 AM today"); never mention how long the hold lasts. Then collect their full name, home address and phone number, one question at a time. Accept the address exactly as the patient says it: never ask for a city, province, postal code or unit. After all three are collected, do a final check: read them back in this form: "Just a final check: your name is ..., your address is ..., and your phone number is ... Is that all correct?" (phone as digits). If the patient corrects something, update it and read all three back again. Only when the patient says yes, tell them the payment screen is open and to tap Done to confirm (or Release hold for a different time); then stay quiet until the screen reports what they tapped. Never invent booking IDs, prices or times that are not listed below; the screen shows IDs.',
+      'RESCHEDULING: if the patient wants to change an existing booking, the screen finds it (booking ID or phone number), you offer new open times, and you ask them to confirm before it is moved. The booking ID and payment stay the same. Emergency bookings cannot be moved here; they must call the clinic.',
       'ADDRESS RULE: whatever the patient says for their address the first time is final, even if it is only a number, only a street, misheard or unusual. NEVER ask any follow-up about the address: no street name, house number, city, province, state, postal code, ZIP, unit, spelling or "full address". Never ask them to repeat or complete it. Acknowledge briefly and go straight to the phone number.',
       'EMERGENCIES: if the patient mentions chest pain, trouble breathing, stroke signs, heavy bleeding, fainting, a severe allergic reaction, suicidal thoughts, a baby with a fever, a head injury, poisoning, sudden confusion, severe abdominal pain, choking, a bone sticking out or a limb bent the wrong way, a bad burn, bleeding during pregnancy, or feeling like they are dying, or says it is urgent (but not "not urgent" or "urgent care"), say clearly: "This sounds like an emergency. If you are in danger, call emergency services, 911." Then tell them what the clinic screen reserved (a same-day priority slot, or, when the clinic is closed, an ER visit now plus a priority follow-up) and collect their full name, home address and phone number, one at a time (never ask for city or postal code). Stay calm and reassuring.',
       '',
@@ -702,10 +901,19 @@ export class Orchestrator {
         lines.push(`- Slot ON HOLD: ${s.hold.range}, hold ${s.hold.id}. Do not mention how long the hold lasts.`);
         lines.push(`- Collected: name=${s.patient.name || 'MISSING'}, address=${s.patient.address || 'MISSING'}, phone=${s.patient.phone || 'MISSING'}.`);
         lines.push(s.patient.address ? '- The address is complete as given. Do not ask for city, province or postal code.' : '- When the patient gives an address, accept it exactly as said. Never ask for city, province or postal code.');
-        if (this.collectingDetails()) lines.push(`- Ask for the ${s.awaiting} next. Then do the final check of all three details.`);
+        if (this.collectingDetails()) lines.push(`- Ask for the ${s.awaiting} next. Then do the final check of all three details. The payment screen is NOT open yet; never say it is.${s.awaiting === 'phone' ? ' A phone number has exactly 10 digits; if the patient gives fewer, ask for the full number.' : ''}`);
         else if (s.awaiting === 'confirm') lines.push('- All details collected. Do the final check now: read all three back and ask "Is that all correct?". Do NOT mention payment until the patient says yes.');
         else lines.push('- The patient confirmed their details. The payment screen is open and the conversation is paused. Say nothing more until the screen reports Done or Release hold.');
       }
+      if (s.change) {
+        const c = s.change;
+        const what = c.booking ? `booking ${c.booking.id} (currently ${c.booking.range} with ${this.doctor(c.booking.doctorId)?.name})` : 'a booking';
+        if (c.booking) lines.push(`- The booking is FOUND and VERIFIED: ${c.booking.id} (spoken "${this.spellId(c.booking.id)}"; dashes and spaces don't matter, so "PVAASH2" and "PVA-ASH2" are the same). Never question, re-check or ask for the booking ID again.`);
+        lines.push(`- RESCHEDULING ${what}. ${c.stage === 'find' ? 'Ask for the booking ID or the phone number it was booked with.'
+          : c.stage === 'pick' ? 'Ask which day or time they want instead and offer open times from the list.'
+          : `Waiting for the patient to confirm moving it to ${c.newSlot.range}.`} Payment carries over; no new payment is needed. Never say it has been moved until the NEXT LINE says "Done".`);
+      }
+      if (s.confirmed && !s.change) lines.push(`- This booking is complete${s.confirmed.rescheduledFrom ? ' and was just RESCHEDULED' : ''}. The patient's name, address and phone are already on file and payment is done: do NOT ask for any details or payment again.`);
       if (s.confirmed) lines.push(`- BOOKED and paid: ${this.doctor(s.confirmed.doctorId)?.name}, ${s.confirmed.range}, booking ID ${s.confirmed.id}. A receipt SMS was sent.`);
       if (!s.problem && !s.doctorId) lines.push('- Nothing booked yet. Ask what brings them in today.');
     }

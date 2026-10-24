@@ -134,7 +134,9 @@ function randomCode(len = 4) {
 // onRecord(kind, booking, extra) is called on every booking change so a
 // persistent store can keep a full record. idTaken(id) avoids reusing ids
 // that already exist in that store.
-export function createDb({ now = () => Date.now(), onRecord = null, idTaken = () => false } = {}) {
+// restore() returns saved upcoming bookings (see records.upcoming) to put
+// back into the schedule on start and on every reset.
+export function createDb({ now = () => Date.now(), onRecord = null, idTaken = () => false, restore = null } = {}) {
   let bookings = new Map(); // id -> booking
   let sms = [];
   let events = []; // dashboard activity log
@@ -262,6 +264,17 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     bookings = new Map();
     sms = [];
     events = [];
+    // Real bookings first (newest wins a slot clash), then demo bookings
+    // fill each doctor's first open slots around them.
+    let restored = 0;
+    for (const r of restore?.(now()) || []) {
+      if (!doctor(r.doctorId) || bookings.has(r.id)) continue;
+      const sid = slotId(r.doctorId, r.date, r.time);
+      if (bookingAt(sid)) continue;
+      const { doctorId: _d, date: _a, time: _t, ...rest } = r;
+      insert({ ...rest, slotId: sid, status: 'confirmed', displaced: false, displacedFrom: null });
+      restored++;
+    }
     for (const [doctorId, seeds] of Object.entries(SEED)) {
       const open = freeSlots(doctorId, { limit: 6 });
       for (const [pos, name, reason] of seeds) {
@@ -269,7 +282,7 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
         insert({ id: newId('PVA'), slotId: open[pos].id, status: 'confirmed', payment: 'paid', reason, patient: { name, phone: '', address: '' } });
       }
     }
-    log('info', 'Clinic schedule loaded');
+    log('info', `Clinic schedule loaded${restored ? ` (${restored} saved booking${restored === 1 ? '' : 's'} restored)` : ''}`);
   }
 
   // Place a 5-minute hold on an open slot.
@@ -407,6 +420,31 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     return { booking: b, displaced };
   }
 
+  // Move a confirmed (paid) booking to another open slot. Same booking ID,
+  // payment carries over. Emergency bookings aren't moved this way.
+  function reschedule(id, sid) {
+    sweep();
+    const b = bookings.get(id);
+    if (!b) throw httpError(404, `Booking ${id} not found.`);
+    if (b.emergency) throw httpError(409, 'Emergency bookings can\'t be moved here. Please call the clinic.');
+    if (b.status !== 'confirmed') throw httpError(409, `Booking ${id} isn't confirmed yet, so there's nothing to reschedule.`);
+    const { doctorId, date, time } = parseSlotId(sid);
+    if (!doctor(doctorId)) throw httpError(400, `Unknown doctor in slot ${sid}`);
+    if (sid === b.slotId) throw httpError(409, 'That is already the booked time.');
+    const st = slotStatus(doctorId, date, time);
+    if (st !== 'open') throw httpError(409, `That time isn't available (${st}). Please pick another.`);
+
+    const from = { date: b.date, time: b.time, doctorId: b.doctorId };
+    const fromLabel = `${doctor(b.doctorId).short} ${label(b)}`;
+    bookings.delete(id);
+    const moved = insert({ ...b, slotId: sid, displaced: false, displacedFrom: null, rescheduledFrom: from });
+    const d = doctor(doctorId);
+    const sms = sendSms('patient', `Maple Clinic: Your appointment ${b.id} has been rescheduled to ${fullRange(moved.date, moved.time)} with ${d.name}. Was: ${fullRange(from.date, from.time)}. Reply C to cancel.`, 'rescheduled');
+    record('rescheduled', moved, { from: fullRange(from.date, from.time), fromDoctor: doctor(from.doctorId).name, to: fullRange(moved.date, moved.time), sms: sms.body });
+    log('rescheduled', `${b.id} rescheduled — ${fromLabel} → ${d.short} ${label(moved)}`);
+    return moved;
+  }
+
   function updatePatient(id, patient = {}) {
     const b = bookings.get(id);
     if (!b) throw httpError(404, 'Booking not found');
@@ -446,7 +484,7 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
   }
 
   reset();
-  return { reset, hold, release, pay, emergency, updatePatient, snapshot, freeSlots, availability, get: (id) => bookings.get(id) };
+  return { reset, hold, release, pay, emergency, reschedule, updatePatient, snapshot, freeSlots, availability, get: (id) => bookings.get(id) };
 }
 
 export function httpError(status, message) {

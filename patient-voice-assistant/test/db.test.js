@@ -144,3 +144,21 @@ test('updatePatient fills details; reset reseeds', () => {
   db.reset();
   assert.ok(db.snapshot().bookings.every((b) => !b.emergency));
 });
+
+test('reschedule: moves a confirmed booking, keeps ID and payment, frees the old slot', () => {
+  const db = createDb({ now: clock(at(2026, 10, 27, 8)).now });
+  const [first, , third] = db.freeSlots('kim', { limit: 3 });
+  const b = db.hold({ slotId: first.id });
+  db.pay(b.id);
+  const moved = db.reschedule(b.id, third.id);
+  assert.equal(moved.id, b.id);
+  assert.equal(moved.slotId, third.id);
+  assert.equal(moved.payment, 'paid');
+  assert.deepEqual(moved.rescheduledFrom, { date: first.date, time: first.time, doctorId: 'kim' });
+  assert.ok(db.freeSlots('kim', { limit: 5 }).some((x) => x.id === first.id), 'old slot is free again');
+  assert.equal(db.snapshot().sms.at(-1).kind, 'rescheduled');
+  assert.throws(() => db.reschedule(b.id, third.id), /already the booked time/);
+  assert.throws(() => db.reschedule(b.id, 'kim|2026-11-01|10:00'), /isn't available \(closed\)/);
+  const { booking: er } = db.emergency({ doctorId: 'chen' });
+  assert.throws(() => db.reschedule(er.id, db.freeSlots('chen', { limit: 1 })[0].id), /Emergency bookings/);
+});

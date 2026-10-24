@@ -347,3 +347,8 @@ mark.kw-red { background: var(--red-bg); color: var(--red); }
 .eb-advice { margin-top: 10px; font-weight: 700; }
 .eb-advice.er { padding: 8px 10px; border-radius: 10px; background: var(--red); color: #fff; }
 .cal-slot.ss-emergency { border-color: var(--red); color: #ffb3b3; text-decoration: line-through; }
+.ev-rescheduled { color: var(--blue); }
+.schedule .bid { font-size: 10px; color: var(--muted); margin-top: 2px; user-select: all; }
+.schedule th, .schedule td { padding-left: 6px; padding-right: 6px; }
+.bubble.cutoff { opacity: .5; }
+.bubble.cutoff .body::after { content: ' (cut off)'; font-size: 11px; color: var(--muted); }

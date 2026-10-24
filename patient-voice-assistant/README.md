@@ -48,7 +48,9 @@ Record a roughly 30-second screen capture of the whole flow and save it as `publ
    - Ava reads all three back and asks *"Is that all correct?"* Say *yes*, or name what to fix.
    - On *yes*, the payment screen opens and the conversation pauses (mic, demo phrases and typing are off). Tap **Done** to book or **Release hold** to pick another time; Ava then acknowledges.
    - The cards fill in and the receipt SMS arrives. The slot is held for 5 minutes in the background; the payment screen shows the countdown.
-3. **Barge-in (30 s).** While Ava is talking, start speaking. Her audio stops at once and the character switches to listening.
+3. **Reschedule (1 min).** After booking, say *"Can I reschedule my appointment?"* (or tap the chip). In a new chat, Ava asks for the booking ID or the phone number it was booked with.
+   - Ask for a day or time (*"anything Wednesday afternoon?"*), pick one, and confirm with *yes*. The booking keeps its ID and payment, the old slot frees up, and an SMS with the new time arrives. *"Never mind"* keeps the original. Emergency bookings can't be moved by voice.
+4. **Barge-in (30 s).** While Ava is talking, start speaking. Her audio stops at once and the character switches to listening.
 
 Cost to quote: about $0.05–$0.10 per 5-minute call (Boson docs). The header shows a live session timer and cost estimate.
 

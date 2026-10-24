@@ -31,7 +31,7 @@ const CLIPS_DIR = path.join(ROOT, 'clips');
 
 const boson = createBoson({ apiKey: API_KEY, apiBase: API_BASE });
 const records = createBookingRecords({ file: path.join(ROOT, 'data', 'bookings.json') });
-const db = createDb({ onRecord: records.apply, idTaken: records.has });
+const db = createDb({ onRecord: records.apply, idTaken: records.has, restore: (now) => records.upcoming(now) });
 const clips = createClipStore({ boson, dir: CLIPS_DIR, voice: VOICE });
 const conversations = createConversationStore({ dir: path.join(ROOT, 'data', 'conversations') });
 
@@ -196,6 +196,11 @@ const routes = [
   }],
   ['POST', /^\/api\/bookings\/([\w-]+)\/pay$/, (req, res, m) => {
     const booking = db.pay(m[1]);
+    sendJson(res, 200, { booking, state: db.snapshot() });
+  }],
+  ['POST', /^\/api\/bookings\/([\w-]+)\/reschedule$/, async (req, res, m) => {
+    const body = await readJson(req);
+    const booking = db.reschedule(m[1], String(body.slotId || ''));
     sendJson(res, 200, { booking, state: db.snapshot() });
   }],
   ['PATCH', /^\/api\/bookings\/([\w-]+)$/, async (req, res, m) => {
