@@ -10,7 +10,7 @@ import { api } from './api.js';
 import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
   parseTimes, matchSlot, isConfirmation, isBookingIntent, isPaymentDone, extractDetails,
-  parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, SPECIALTY_DOCTOR,
+  parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, cleanAddress, isAddressFollowUp, SPECIALTY_DOCTOR,
 } from './keywords.js';
 
 const FIELDS = ['name', 'address', 'phone'];
@@ -223,7 +223,8 @@ export class Orchestrator {
     if (s.hold?.slotId === slotId) return;
     if (s.hold) await api.release(s.hold.id).catch(() => {});
     try {
-      const res = await api.hold(slotId, s.problem || 'General consultation', s.patient);
+      const conversationId = await this.hooks.conversationId?.();
+      const res = await api.hold(slotId, s.problem || 'General consultation', s.patient, { conversationId, specialty: s.specialty, doctorSource: s.doctorSource });
       s.hold = res.booking;
       s.doctorId = res.booking.doctorId;
       s.proposedSlotId = null;
@@ -287,7 +288,8 @@ export class Orchestrator {
     this.hooks.playClip('emergency');
 
     if (s.hold) { await api.release(s.hold.id).catch(() => {}); s.hold = null; }
-    const res = await api.emergency(emergencyDoctorFor(text || phrase), text || phrase, s.patient);
+    const conversationId = await this.hooks.conversationId?.();
+    const res = await api.emergency(emergencyDoctorFor(text || phrase), text || phrase, s.patient, { conversationId, specialty: detectSpecialty(text || ''), alertSource: source, alertPhrase: phrase });
     s.emergency = res.booking;
     s.displaced = res.displaced;
     s.doctorId = res.booking.doctorId;
@@ -415,8 +417,13 @@ export class Orchestrator {
         await this.savePatient(extractReadback(text));
         // Ava moved on to payment right after the patient said yes to the final check.
         if (normalHold && isPayPrompt(text) && s.awaiting === 'confirm' && isConfirmation(s.lastUserText)) { s.awaiting = 'payment'; this.changed(); }
-        // Ava asked for city/province anyway: steer her straight back on track.
-        if (s.patient.address && /\b(?:city|province|postal code|postcode|zip code)\b/i.test(text)) {
+        // Ava asked a follow-up about the address anyway: steer her straight back.
+        if (isAddressFollowUp(text)) {
+          // If we missed the address, the patient's last answer was it.
+          if (!s.patient.address && s.lastUserText && !detectRedFlag(s.lastUserText)) {
+            const guess = cleanAddress(s.lastUserText);
+            if (guess) await this.savePatient({ address: guess });
+          }
           const next = FIELDS.includes(s.awaiting) ? ASK[s.awaiting] : this.detailsWrapUp();
           return this.respond(`Actually, the address you gave is all I need. ${next}`, { nudge: true });
         }
@@ -460,7 +467,7 @@ export class Orchestrator {
       'You are Ava, the friendly voice booking assistant for Maple Clinic. Speak naturally, warmly and briefly: 1-2 short sentences per turn. Never use lists or markdown.',
       'RULE: Always have the patient describe their problem first, then book. Recommend the doctor whose specialty fits, offer up to three of their open times, and let the patient pick.',
       'When the patient picks a time, say you are holding it for them and give the appointment as a 30-minute range (for example "11:00 AM to 11:30 AM today"); never mention how long the hold lasts. Then collect their full name, home address and phone number, one question at a time. Accept the address exactly as the patient says it: never ask for a city, province, postal code or unit. After all three are collected, do a final check: read them back in this form: "Just a final check: your name is ..., your address is ..., and your phone number is ... Is that all correct?" (phone as digits). If the patient corrects something, update it and read all three back again. Only when the patient says yes, tell them the payment screen is open and to tap Done to confirm (or Release hold for a different time); then stay quiet until the screen reports what they tapped. Never invent booking IDs, prices or times that are not listed below; the screen shows IDs.',
-      'ADDRESS RULE: whatever the patient says for their address is final, even if it is only a street name and number. NEVER ask for a city, province, state, postal code, ZIP or unit, and never ask them to complete the address. After the address, go straight to the phone number.',
+      'ADDRESS RULE: whatever the patient says for their address the first time is final, even if it is only a number, only a street, misheard or unusual. NEVER ask any follow-up about the address: no street name, house number, city, province, state, postal code, ZIP, unit, spelling or "full address". Never ask them to repeat or complete it. Acknowledge briefly and go straight to the phone number.',
       'EMERGENCIES: if the patient mentions chest pain, trouble breathing, stroke signs, heavy bleeding, fainting, a severe allergic reaction, suicidal thoughts, a baby with a fever, a head injury, poisoning, sudden confusion, severe abdominal pain, choking, a bone sticking out or a limb bent the wrong way, a bad burn, bleeding during pregnancy, or feeling like they are dying, or says it is urgent (but not "not urgent" or "urgent care"), say clearly: "This sounds like an emergency. If you are in danger, call emergency services, 911." Then tell them a same-day emergency slot has been reserved and collect their full name, home address and phone number, one at a time (never ask for city or postal code). Stay calm and reassuring.',
       '',
       'DOCTORS:',
@@ -474,7 +481,7 @@ export class Orchestrator {
       const d = b && this.doctor(b.doctorId);
       lines.push(`- EMERGENCY MODE. ${b ? `Emergency booking ${b.id} with ${d.name}, ${b.range} (payment waived).` : 'Reserving an emergency slot now.'}`);
       lines.push(`- Collected: name=${s.patient.name || 'MISSING'}, address=${s.patient.address || 'MISSING'}, phone=${s.patient.phone || 'MISSING'}.`);
-      if (s.patient.address) lines.push('- The address is complete as given. Do not ask for city, province or postal code.');
+      lines.push(s.patient.address ? '- The address is complete as given. Do not ask for city, province or postal code.' : '- When the patient gives an address, accept it exactly as said. Never ask for city, province or postal code.');
       lines.push(s.awaiting ? `- Ask for the ${s.awaiting} next.` : '- All details collected: confirm the booking ID and reassure the patient.');
     } else {
       if (s.problem) lines.push(`- Problem described: "${s.problem}".`);
@@ -482,7 +489,7 @@ export class Orchestrator {
       if (s.hold) {
         lines.push(`- Slot ON HOLD: ${s.hold.range}, hold ${s.hold.id}. Do not mention how long the hold lasts.`);
         lines.push(`- Collected: name=${s.patient.name || 'MISSING'}, address=${s.patient.address || 'MISSING'}, phone=${s.patient.phone || 'MISSING'}.`);
-        if (s.patient.address) lines.push('- The address is complete as given. Do not ask for city, province or postal code.');
+        lines.push(s.patient.address ? '- The address is complete as given. Do not ask for city, province or postal code.' : '- When the patient gives an address, accept it exactly as said. Never ask for city, province or postal code.');
         if (this.collectingDetails()) lines.push(`- Ask for the ${s.awaiting} next. Then do the final check of all three details.`);
         else if (s.awaiting === 'confirm') lines.push('- All details collected. Do the final check now: read all three back and ask "Is that all correct?". Do NOT mention payment until the patient says yes.');
         else lines.push('- The patient confirmed their details. The payment screen is open and the conversation is paused. Say nothing more until the screen reports Done or Release hold.');
@@ -490,12 +497,17 @@ export class Orchestrator {
       if (s.confirmed) lines.push(`- BOOKED and paid: ${this.doctor(s.confirmed.doctorId)?.name}, ${s.confirmed.range}, booking ID ${s.confirmed.id}. A receipt SMS was sent.`);
       if (!s.problem && !s.doctorId) lines.push('- Nothing booked yet. Ask what brings them in today.');
     }
+    if (this.resumeTranscript?.length) {
+      lines.push('', 'EARLIER IN THIS CONVERSATION (before a page refresh, continue from here):');
+      for (const m of this.resumeTranscript) lines.push(`${m.role === 'user' ? 'Patient' : 'Ava'}: ${m.text}`);
+    }
     if (s.reply) lines.push('', `SUGGESTED NEXT LINE (adapt naturally): "${s.reply}"`);
     return lines.join('\n');
   }
 
   async reset() {
     this.s = fresh();
+    this.resumeTranscript = [];
     this.applyState((await api.reset()));
   }
 }

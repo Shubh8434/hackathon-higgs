@@ -16,6 +16,8 @@ import { loadEnv } from './lib/env.js';
 import { createBoson } from './lib/boson.js';
 import { createDb } from './lib/db.js';
 import { createClipStore, resolveRefImage } from './lib/clips.js';
+import { createConversationStore } from './lib/conversations.js';
+import { createBookingRecords } from './lib/records.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 loadEnv(ROOT);
@@ -28,8 +30,10 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const CLIPS_DIR = path.join(ROOT, 'clips');
 
 const boson = createBoson({ apiKey: API_KEY, apiBase: API_BASE });
-const db = createDb();
+const records = createBookingRecords({ file: path.join(ROOT, 'data', 'bookings.json') });
+const db = createDb({ onRecord: records.apply, idTaken: records.has });
 const clips = createClipStore({ boson, dir: CLIPS_DIR, voice: VOICE });
+const conversations = createConversationStore({ dir: path.join(ROOT, 'data', 'conversations') });
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -73,6 +77,15 @@ async function readJson(req, limit = 25 * 1024 * 1024) {
   } catch {
     throw Object.assign(new Error('Invalid JSON body'), { status: 400 });
   }
+}
+
+// Context the browser attaches to a booking (which conversation, why this doctor).
+function cleanMeta(meta = {}) {
+  const out = {};
+  for (const k of ['conversationId', 'specialty', 'doctorSource', 'alertSource', 'alertPhrase']) {
+    if (typeof meta?.[k] === 'string' && meta[k].trim()) out[k] = meta[k].trim().slice(0, 300);
+  }
+  return out;
 }
 
 function requireKey() {
@@ -174,7 +187,7 @@ const routes = [
   ['POST', /^\/api\/reset$/, (req, res) => { db.reset(); sendJson(res, 200, db.snapshot()); }],
   ['POST', /^\/api\/holds$/, async (req, res) => {
     const body = await readJson(req);
-    const booking = db.hold({ slotId: body.slotId, reason: body.reason, patient: body.patient });
+    const booking = db.hold({ slotId: body.slotId, reason: body.reason, patient: body.patient, meta: cleanMeta(body.meta) });
     sendJson(res, 200, { booking, state: db.snapshot() });
   }],
   ['DELETE', /^\/api\/holds\/([\w-]+)$/, (req, res, m) => {
@@ -192,8 +205,28 @@ const routes = [
   }],
   ['POST', /^\/api\/emergency$/, async (req, res) => {
     const body = await readJson(req);
-    const result = db.emergency({ doctorId: body.doctorId, reason: body.reason, patient: body.patient });
+    const result = db.emergency({ doctorId: body.doctorId, reason: body.reason, patient: body.patient, meta: cleanMeta(body.meta) });
     sendJson(res, 200, { ...result, state: db.snapshot() });
+  }],
+
+  // --- Bookings database (data/bookings.json) ------------------------------
+  ['GET', /^\/api\/booking-records$/, (req, res) => sendJson(res, 200, { bookings: records.list() })],
+  ['GET', /^\/api\/booking-records\/([\w-]+)$/, (req, res, m) => {
+    const record = records.get(m[1]);
+    if (!record) throw Object.assign(new Error(`Booking ${m[1]} not found`), { status: 404 });
+    let conversation = null;
+    try { conversation = record.conversationId ? conversations.get(record.conversationId) : null; } catch {}
+    sendJson(res, 200, { ...record, conversation: conversation && { id: conversation.id, messages: conversation.messages } });
+  }],
+
+  // --- Conversation history (data/conversations/<id>.json) ----------------
+  ['GET', /^\/api\/conversations$/, (req, res) => sendJson(res, 200, { conversations: conversations.list() })],
+  ['POST', /^\/api\/conversations$/, (req, res) => sendJson(res, 200, conversations.create())],
+  ['GET', /^\/api\/conversations\/([\w-]+)$/, (req, res, m) => sendJson(res, 200, conversations.get(m[1]))],
+  ['PUT', /^\/api\/conversations\/([\w-]+)$/, async (req, res, m) => {
+    const body = await readJson(req);
+    const doc = conversations.save(m[1], body);
+    sendJson(res, 200, { id: doc.id, updatedAt: doc.updatedAt });
   }],
 ];
 

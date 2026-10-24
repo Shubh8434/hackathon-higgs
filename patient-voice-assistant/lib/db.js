@@ -63,13 +63,17 @@ function randomCode(len = 4) {
   return out;
 }
 
-export function createDb({ now = () => Date.now() } = {}) {
+// onRecord(kind, booking, extra) is called on every booking change so a
+// persistent store can keep a full record. idTaken(id) avoids reusing ids
+// that already exist in that store.
+export function createDb({ now = () => Date.now(), onRecord = null, idTaken = () => false } = {}) {
   let bookings = new Map(); // id -> booking
   let sms = [];
   let events = []; // dashboard activity log
   let seq = 0;
 
   const doctor = (id) => DOCTORS.find((d) => d.id === id);
+  const record = (kind, b, extra = {}) => onRecord?.(kind, structuredClone(b), extra);
 
   function log(kind, text) {
     events.push({ id: ++seq, kind, text, at: now() });
@@ -85,7 +89,7 @@ export function createDb({ now = () => Date.now() } = {}) {
 
   function newId(prefix) {
     let id;
-    do { id = `${prefix}-${randomCode()}`; } while (bookings.has(id));
+    do { id = `${prefix}-${randomCode()}`; } while (bookings.has(id) || idTaken(id));
     return id;
   }
 
@@ -94,6 +98,7 @@ export function createDb({ now = () => Date.now() } = {}) {
     for (const b of bookings.values()) {
       if (b.status === 'held' && b.holdExpiresAt <= now()) {
         bookings.delete(b.id);
+        record('expired', b);
         log('expired', `Hold ${b.id} expired — ${doctor(b.doctorId).short} ${slotLabel(b.day, b.time)} released`);
       }
     }
@@ -153,7 +158,7 @@ export function createDb({ now = () => Date.now() } = {}) {
   }
 
   // Place a 5-minute hold on a free slot.
-  function hold({ slotId: sid, reason = '', patient = {} }) {
+  function hold({ slotId: sid, reason = '', patient = {}, meta = {} }) {
     sweep();
     const { doctorId } = parseSlotId(sid);
     if (!doctor(doctorId)) throw httpError(400, `Unknown doctor in slot ${sid}`);
@@ -166,7 +171,9 @@ export function createDb({ now = () => Date.now() } = {}) {
       reason,
       patient: { name: '', phone: '', address: '', ...patient },
       holdExpiresAt: now() + HOLD_MS,
+      meta,
     });
+    record('held', b);
     log('hold', `Hold ${b.id} — ${doctor(doctorId).short} ${slotLabel(b.day, b.time)} (5 min)`);
     return b;
   }
@@ -175,6 +182,7 @@ export function createDb({ now = () => Date.now() } = {}) {
     const b = bookings.get(id);
     if (!b || b.status !== 'held') return false;
     bookings.delete(id);
+    record('released', b);
     log('released', `Hold ${id} released`);
     return true;
   }
@@ -190,14 +198,15 @@ export function createDb({ now = () => Date.now() } = {}) {
     b.payment = 'paid';
     delete b.holdExpiresAt;
     const d = doctor(b.doctorId);
-    sendSms('patient', `Maple Clinic: Booking confirmed with ${d.name} (${d.title}), ${slotRange(b.day, b.time)}. Booking ID ${b.id}. Payment received. Reply C to cancel.`, 'receipt');
+    const receipt = sendSms('patient', `Maple Clinic: Booking confirmed with ${d.name} (${d.title}), ${slotRange(b.day, b.time)}. Booking ID ${b.id}. Payment received. Reply C to cancel.`, 'receipt');
+    record('confirmed', b, { sms: receipt.body });
     log('confirmed', `Booking ${b.id} confirmed — ${d.short} ${slotLabel(b.day, b.time)}`);
     return b;
   }
 
   // Emergency: take the doctor's next same-day slot. If a normal booking
   // already sits there, move it to the doctor's next free slot.
-  function emergency({ doctorId = 'patel', reason = 'Emergency', patient = {} } = {}) {
+  function emergency({ doctorId = 'patel', reason = 'Emergency', patient = {}, meta = {} } = {}) {
     sweep();
     if (!doctor(doctorId)) throw httpError(400, `Unknown doctor ${doctorId}`);
 
@@ -221,17 +230,20 @@ export function createDb({ now = () => Date.now() } = {}) {
       emergency: true,
       reason,
       patient: { name: '', phone: '', address: '', ...patient },
+      meta,
     });
     const d = doctor(doctorId);
 
     let displaced = null;
     if (ex && ex.status === 'held') {
+      record('released', ex, { reason: 'Slot taken by an emergency' });
       log('released', `Hold ${ex.id} released for emergency`);
     } else if (ex) {
       const next = freeSlots(doctorId, { limit: 1 })[0];
       const fromLabel = slotLabel(ex.day, ex.time);
       if (next) {
         displaced = insert({ ...ex, slotId: next.id, displaced: true, displacedFrom: { day: ex.day, time: ex.time } });
+        record('moved', displaced, { from: fromLabel, to: slotRange(next.day, next.time), reason: `Pre-empted by emergency ${b.id}` });
         sendSms(ex.patient.name || 'patient', `Maple Clinic: Your ${fromLabel} appointment with ${d.short} moved to ${slotRange(next.day, next.time)} due to an emergency. Sorry for the inconvenience.`, 'displaced');
         log('displaced', `${ex.patient.name || ex.id} moved ${fromLabel} → ${next.label}`);
       } else {
@@ -239,7 +251,11 @@ export function createDb({ now = () => Date.now() } = {}) {
       }
     }
 
-    sendSms('patient', `Maple Clinic EMERGENCY: ${d.name} is expecting you ${slotRange(b.day, b.time).replace(/ today$/, ' TODAY')}. Booking ID ${b.id}. If symptoms worsen, call emergency services (911) immediately.`, 'emergency');
+    const alert = sendSms('patient', `Maple Clinic EMERGENCY: ${d.name} is expecting you ${slotRange(b.day, b.time).replace(/ today$/, ' TODAY')}. Booking ID ${b.id}. If symptoms worsen, call emergency services (911) immediately.`, 'emergency');
+    record('emergency', b, {
+      sms: alert.body,
+      displaced: displaced ? { bookingId: displaced.id, patient: displaced.patient.name, from: slotLabel(displaced.displacedFrom.day, displaced.displacedFrom.time), to: displaced.range } : null,
+    });
     log('emergency', `EMERGENCY ${b.id} — ${d.short} ${slotLabel(b.day, b.time)}${displaced ? ' (pre-empted a normal booking)' : ''}`);
     return { booking: b, displaced };
   }
@@ -252,7 +268,10 @@ export function createDb({ now = () => Date.now() } = {}) {
       if (typeof patient[k] === 'string' && patient[k].trim()) b.patient[k] = patient[k].trim();
     }
     const changed = ['name', 'phone', 'address'].filter((k) => b.patient[k] !== before[k]);
-    if (changed.length) log('info', `${b.id} details updated: ${changed.join(', ')}`);
+    if (changed.length) {
+      record('details', b, { changed });
+      log('info', `${b.id} details updated: ${changed.join(', ')}`);
+    }
     return b;
   }
 

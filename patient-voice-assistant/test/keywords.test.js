@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
   parseTimes, matchSlot, isConfirmation, isBookingIntent, extractPhone, extractAddress,
-  extractName, extractDetails, highlightSegments, parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits,
+  extractName, extractDetails, highlightSegments, parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, isAddressFollowUp,
 } from '../public/js/keywords.js';
 
 test('red flags: demo phrases trigger, routine ones do not', () => {
@@ -177,4 +177,21 @@ test('times: a spoken 30-minute range is one appointment time', () => {
 test('names: "Myself Subham Sharma" → "Subham Sharma"', () => {
   assert.equal(extractName('Myself Subham Sharma.', { expecting: true }), 'Subham Sharma');
   assert.equal(extractDetails('Myself Subham Sharma', 'name').name, 'Subham Sharma');
+});
+
+test('details: an address given when a name was expected is kept as the address', () => {
+  assert.deepEqual(extractDetails('Street East one two three', 'name'), { address: 'Street East 123' });
+  assert.deepEqual(extractDetails('Ravi Kumar', 'name'), { name: 'Ravi Kumar' });
+});
+
+test('address follow-ups from Ava are detected; read-backs are not', () => {
+  for (const q of [
+    "Thanks. What's the street name for that address?", 'Which city and province is that in?', 'Could you give me your full address?',
+    "What's the house number?", 'Is there a unit or apartment number?', "And what's the postal code?",
+  ]) assert.ok(isAddressFollowUp(q), q);
+  for (const q of [
+    "Got it. What's the best phone number to reach you?",
+    'Just a final check: your name is Ana, your address is Unit 5, 22 King Street, and your phone number is 647. Is that all correct?',
+    "What's your home address?",
+  ]) assert.equal(isAddressFollowUp(q), false, q);
 });

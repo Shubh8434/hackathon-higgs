@@ -24,10 +24,11 @@ let clockOffset = 0; // server now - client now
 // Orchestrator
 // ---------------------------------------------------------------------------
 const orch = new Orchestrator({
-  onChange: () => { scheduleRender(); scheduleInstructionSync(); },
+  onChange: () => { scheduleRender(); scheduleInstructionSync(); scheduleSave(); },
   isLive: () => rt.connected,
   say: async (text) => {
     addBubble('assistant', text, { badge: 'offline voice' });
+    logMessage('assistant', text, 'offline voice');
     await waitFor(() => !avatar.playing, 6000); // let a clip finish first
     voice.say(text);
   },
@@ -35,6 +36,8 @@ const orch = new Orchestrator({
   // about to talk, so two voices never overlap.
   playClip: (key) => avatar.play(key, { muted: rt.connected }),
   nudge: (kind) => nudge(kind),
+  // Links each booking record to this chat (created now if it doesn't exist yet).
+  conversationId: () => ensureConversation().catch(() => null),
 });
 
 function waitFor(cond, timeout) {
@@ -90,6 +93,7 @@ const rt = new RealtimeSession({
     if (paymentPause) { dropUserBubble(); return; }
     if (userBubble) updateBubble(userBubble, text, { pending: false });
     else addBubble('user', text);
+    logMessage('user', text);
     userBubble = null;
     userText = '';
     orch.handleUser(text, { final: true });
@@ -104,6 +108,7 @@ const rt = new RealtimeSession({
   onResponseDone: (text) => {
     if (assistantBubble) updateBubble(assistantBubble, text, { pending: false });
     assistantBubble = null;
+    logMessage('assistant', text);
     orch.handleAssistant(text);
     if (pendingNudge) {
       const { kind, reason } = pendingNudge;
@@ -124,6 +129,7 @@ const rt = new RealtimeSession({
 
 const NOTE = {
   welcome: (r) => `[Session started] Greet the patient with: "${r}"`,
+  resume: () => '[Session resumed after a page refresh] Briefly welcome the patient back and continue exactly where the conversation left off. Do not start over.',
   emergency: (r) => `[Clinic safety system] Red-flag symptoms were detected in what the patient said. Emergency mode is active. Tell the patient now: "${r}"`,
   paid: (r) => `[Clinic screen] The patient tapped Done and the payment went through. Tell the patient: "${r}"`,
 };
@@ -164,8 +170,11 @@ async function connect() {
     await rt.connect({ instructions: orch.buildInstructions(), voice: $('#voiceSelect').value });
     setLive(true);
     setRtStatus('live — speak now');
-    // Greeting: the pre-rendered welcome clip if we have one, else the model says it.
-    if (!avatar.play('welcome')) {
+    // Resuming a saved conversation: pick up where it left off, no greeting.
+    if (messages.length) {
+      nudge('resume');
+    } else if (!avatar.play('welcome')) {
+      // Greeting: the pre-rendered welcome clip if we have one, else the model says it.
       orch.s.reply = WELCOME;
       nudge('welcome');
     }
@@ -199,6 +208,7 @@ async function sendPatientText(text, badge = 'demo') {
   avatar.stop();
   rt.stopPlayback();
   addBubble('user', text, { badge });
+  logMessage('user', text, badge);
 
   if (!rt.connected) {
     orch.handleUser(text, { final: true });
@@ -217,6 +227,93 @@ async function sendPatientText(text, badge = 'demo') {
     syncInstructionsNow();
     if (!rt.prompt(text)) pendingNudge = { kind: 'demo', reason: 'busy' };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Conversation history: every final message + the booking state is saved to
+// data/conversations/<id>.json. The id lives in the URL (?c=…) and
+// localStorage, so a refresh restores the chat.
+// ---------------------------------------------------------------------------
+const CONV_KEY = 'pva.conversation';
+let convId = null;
+let messages = [];
+let creating = null;
+let saveTimer = null;
+
+function logMessage(role, text, badge = '') {
+  if (!String(text || '').trim()) return;
+  messages.push({ role, text, badge, at: Date.now() });
+  scheduleSave();
+}
+
+function setConvId(id) {
+  convId = id;
+  const url = new URL(location.href);
+  if (id) { url.searchParams.set('c', id); localStorage.setItem(CONV_KEY, id); }
+  else { url.searchParams.delete('c'); localStorage.removeItem(CONV_KEY); }
+  history.replaceState(null, '', url);
+  $('#convId').textContent = id || 'new';
+  $('#convId').title = id ? `Saved as ${id}. Refresh or open this link to restore it.` : 'Saved once the conversation starts';
+}
+
+// Created lazily on the first message, so empty visits don't leave files.
+async function ensureConversation() {
+  if (convId) return convId;
+  creating ||= api.createConversation().then((doc) => { setConvId(doc.id); refreshHistory(); return doc.id; }).finally(() => { creating = null; });
+  return creating;
+}
+
+function scheduleSave() {
+  if (!convId && !messages.length) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveNow, 400);
+}
+
+async function saveNow({ keepalive = false } = {}) {
+  clearTimeout(saveTimer);
+  if (!messages.length && !convId) return;
+  try {
+    const id = await ensureConversation();
+    const body = JSON.stringify({ messages, state: orch.s });
+    if (keepalive) {
+      fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive: true });
+    } else {
+      await api.saveConversation(id, JSON.parse(body));
+    }
+  } catch (err) {
+    console.warn('Conversation save failed:', err.message);
+  }
+}
+
+function startNewConversation() {
+  messages = [];
+  orch.resumeTranscript = [];
+  setConvId(null);
+}
+
+async function restoreConversation(id) {
+  const doc = await api.conversation(id);
+  setConvId(doc.id);
+  messages = doc.messages || [];
+  clearCaptions();
+  for (const m of messages) addBubble(m.role, m.text, { badge: m.badge });
+  if (doc.state) Object.assign(orch.s, doc.state, { error: '' });
+  orch.resumeTranscript = messages.slice(-12);
+  if (messages.length) addBubble('assistant', `Conversation ${doc.id} restored. Click Start voice session to continue.`, { badge: 'restored' });
+}
+
+async function refreshHistory() {
+  const sel = $('#convSelect');
+  try {
+    const { conversations } = await api.conversations();
+    sel.innerHTML = '';
+    sel.append(new Option('History…', ''));
+    for (const c of conversations.slice(0, 30)) {
+      const t = new Date(c.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      const who = c.summary?.patient ? ` · ${c.summary.patient}` : '';
+      sel.append(new Option(`${t}${who} · ${c.summary?.status || ''} · ${c.id}`, c.id));
+    }
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +471,7 @@ function bind() {
     clearCaptions();
     hideError();
     pendingNudge = null;
+    startNewConversation();
     await orch.reset();
     syncInstructionsNow();
   });
@@ -384,6 +482,11 @@ function bind() {
     modal.querySelector('video')?.pause();
   }));
   $('#errorClose').addEventListener('click', hideError);
+  $('#convSelect').addEventListener('change', (e) => {
+    if (!e.target.value) return;
+    location.href = `${location.pathname}?c=${encodeURIComponent(e.target.value)}`;
+  });
+  window.addEventListener('pagehide', () => { if (convId || messages.length) saveNow({ keepalive: true }); });
 }
 
 async function boot() {
@@ -399,6 +502,13 @@ async function boot() {
     $('#keyDot').className = 'dot bad';
     $('#keyLabel').textContent = 'server unreachable';
   }
+  const wanted = new URL(location.href).searchParams.get('c') || localStorage.getItem(CONV_KEY);
+  if (wanted) {
+    try { await restoreConversation(wanted); } catch { startNewConversation(); }
+  } else {
+    setConvId(null);
+  }
+  refreshHistory();
   await poll();
   avatar.refresh();
   setInterval(poll, 3000);

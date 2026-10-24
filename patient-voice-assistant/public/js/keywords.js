@@ -314,7 +314,12 @@ export function extractDetails(text, expecting = null) {
   if (phone) out.phone = phone;
   // A plain answer to "what's your address?" is kept whole, minus lead-in words.
   const bare = expecting === 'address' && !phone && !/\bmy name\b/i.test(text) ? cleanAddress(text) : '';
-  const address = bare.split(/\s+/).length >= 2 ? bare : extractAddress(text);
+  let address = bare.split(/\s+/).length >= 2 ? bare : extractAddress(text);
+  // Asked for a name but got something with numbers in it: that's the address.
+  if (!address && expecting === 'name' && !phone) {
+    const guess = cleanAddress(text);
+    if (/\d/.test(guess) && guess.split(/\s+/).length >= 2) address = guess;
+  }
   if (address) out.address = address;
   // While asking for address/phone, only an explicit "my name is" changes the
   // name ("it's 12 Main St" must not become a name).
@@ -339,6 +344,16 @@ export function extractReadback(text) {
   const phone = extractPhone(raw);
   if (phone) out.phone = phone;
   return out;
+}
+
+// Ava asking a follow-up about an address the patient already gave (street
+// name, house number, city, postal code, unit, "full address"…). Her read-back
+// ("your address is …") is not a follow-up.
+export function isAddressFollowUp(text) {
+  const t = norm(text);
+  if (/\byour (?:home )?address is\b|\bfinal check\b/.test(t)) return false;
+  if (/\b(?:city|province|postal code|postcode|zip code)\b/.test(t)) return true;
+  return /\?/.test(t) && /\b(?:street name|name of (?:the|your) street|which street|what street|street number|house number|building number|unit|apartment|apt|suite|full address|complete address|exact address|whole address|more (?:details|specific) (?:about|on|for) (?:the|your|that) address|spell (?:that|the street|it))\b/.test(t);
 }
 
 // Ava telling the patient the details are ready and to tap Done.
