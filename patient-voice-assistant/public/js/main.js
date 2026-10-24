@@ -27,6 +27,7 @@ const orch = new Orchestrator({
   isLive: () => rt.connected,
   say: async (text) => {
     addBubble('assistant', text, { badge: 'offline voice' });
+    $('#pipeline').innerHTML = '<span class="pl-label">Higgs pipeline</span><span class="pl-step rt"><b>Higgs TTS 3</b> voices Ava (offline mode)</span><span class="pl-idle">Start a voice session for live Higgs Realtime timings.</span>';
     logMessage('assistant', text, 'offline voice');
     voice.say(text);
   },
@@ -49,6 +50,39 @@ let pendingNudge = null; // { kind, reason: 'busy' | 'user-turn' }
 let userSpeaking = false;
 let paymentPause = false; // payment screen open: no patient input until Done / Release
 let replyFallback = null;
+
+// ---------------------------------------------------------------------------
+// Higgs pipeline strip: per-turn timings, shown under the captions.
+//   speech ends → Higgs STT 3.1 transcript → clinic app decides → Higgs Realtime first audio
+// ---------------------------------------------------------------------------
+let pipe = null;
+const secs = (ms) => (ms < 10 ? '<0.01 s' : `${(ms / 1000).toFixed(2)} s`);
+function renderPipeline() {
+  const box = $('#pipeline');
+  if (!pipe) return;
+  const step = (cls, model, what, ms) => `<span class="pl-step ${cls}"><b>${model}</b> ${what}${ms != null ? ` <i>${secs(ms)}</i>` : ' <i>…</i>'}</span>`;
+  const arrow = '<span class="pl-arrow">→</span>';
+  const parts = [
+    step('stt', 'Higgs STT 3.1', 'transcript', pipe.stt && pipe.stop ? pipe.stt - pipe.stop : null),
+    step('app', 'Clinic agent', pipe.action || 'decides', pipe.sent && pipe.stt ? pipe.sent - pipe.stt : null),
+    step('rt', 'Higgs Realtime', 'first audio', pipe.audio && pipe.sent ? pipe.audio - pipe.sent : null),
+  ];
+  const total = pipe.audio && pipe.stop ? `<span class="pl-total">speech end → Ava speaking <b>${secs(pipe.audio - pipe.stop)}</b></span>` : '';
+  const flag = pipe.flag ? `<span class="pl-flag">⚠ Safety net caught "${pipe.flag}" on the live partial transcript, before the sentence ended</span>` : '';
+  box.innerHTML = `<span class="pl-label">Higgs pipeline</span>${parts.join(arrow)}${total}${flag}`;
+}
+
+// What the clinic agent did this turn, in a few words.
+function describeAction(s) {
+  if (s.mode === 'emergency') return 'emergency booking';
+  if (s.change) return s.change.stage === 'confirm' ? 'reschedule: confirm' : 'reschedule: offer times';
+  if (s.awaiting === 'payment') return 'opens payment';
+  if (s.hold && ['name', 'address', 'phone'].includes(s.awaiting)) return `holds slot, asks ${s.awaiting}`;
+  if (s.hold && s.awaiting === 'confirm') return 'final check';
+  if (s.confirmed) return 'booking done';
+  if (s.doctorId) return 'checks calendar';
+  return 'triage';
+}
 let turnSeq = 0; // patient turns seen
 let answeredTurn = 0; // last turn Ava was asked to answer
 
@@ -62,6 +96,7 @@ function requestReply(turn = turnSeq, tries = 0) {
   if (turn <= answeredTurn || turn < turnSeq) return; // answered, or a newer turn took over
   syncInstructionsNow();
   if (rt.reply()) {
+    if (pipe && !pipe.sent) { pipe.sent = Date.now(); pipe.action = describeAction(orch.s); renderPipeline(); }
     answeredTurn = turn;
     const sentAt = Date.now();
     setTimeout(() => {
@@ -102,6 +137,8 @@ const rt = new RealtimeSession({
   onStatus: (s) => setRtStatus(s),
   onSpeechStopped: () => {
     userSpeaking = false;
+    pipe = { stop: Date.now() };
+    renderPipeline();
     // If no transcript arrives (STT hiccup), still answer what was heard.
     clearTimeout(replyFallback);
     if (userText.trim()) replyFallback = setTimeout(() => { if (!rt.responseActive) replyAfterTurn(); }, 5000);
@@ -122,18 +159,27 @@ const rt = new RealtimeSession({
     userText += delta;
     if (!userBubble) userBubble = addBubble('user', '', { pending: true });
     updateBubble(userBubble, userText);
+    const wasEmergency = orch.s.mode === 'emergency';
     orch.handleUser(userText, { final: false }); // live safety net
+    if (!wasEmergency && orch.s.mode === 'emergency' && orch.s.alert?.source === 'safety-net') {
+      pipe = { ...(pipe || {}), flag: orch.s.alert.phrase };
+      renderPipeline();
+    }
   },
   onUserFinal: (text) => {
     if (Date.now() < suppressUntil) {
       // Injected demo phrase: it was already handled as text; now answer it.
       suppressUntil = 0;
+      pipe = { ...(pipe || { stop: Date.now() }), stt: Date.now() };
+      renderPipeline();
       if (userBubble) { userBubble.remove(); userBubble = null; }
       replyAfterTurn();
       return;
     }
     clearTimeout(replyFallback);
     if (paymentPause) { dropUserBubble(); return; }
+    pipe = { ...(pipe || { stop: Date.now() }), stt: Date.now() };
+    renderPipeline();
     if (userBubble) updateBubble(userBubble, text, { pending: false });
     else addBubble('user', text);
     logMessage('user', text);
@@ -144,6 +190,9 @@ const rt = new RealtimeSession({
   },
   onResponseStart: () => {
     assistantBubble = null;
+  },
+  onAudioStart: () => {
+    if (pipe && pipe.sent && !pipe.audio) { pipe.audio = Date.now(); renderPipeline(); }
   },
   onAssistantDelta: () => {
     if (!assistantBubble) assistantBubble = addBubble('assistant', '', { pending: true });

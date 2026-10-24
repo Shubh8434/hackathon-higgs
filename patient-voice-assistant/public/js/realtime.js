@@ -203,6 +203,7 @@ export class RealtimeSession {
         break;
 
       case 'response.created':
+        this.audioStarted = false;
         this.requestedAt = 0;
         this.lastCreatedAt = Date.now();
         this.lastResponseAt = Date.now();
@@ -214,6 +215,7 @@ export class RealtimeSession {
       case 'response.output_audio.delta':
       case 'response.audio.delta':
         this.lastResponseAt = Date.now();
+        if (!this.audioStarted) { this.audioStarted = true; this.emit('onAudioStart'); }
         if (msg.delta) this.playChunk(msg.delta);
         break;
 
