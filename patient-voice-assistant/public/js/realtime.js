@@ -30,6 +30,7 @@ export class RealtimeSession {
     this.outputUntil = 0;
     this.micLevel = 0;
     this.injecting = false;
+    this.micPaused = false;
     this.instructions = '';
     this.voice = 'default';
     this.responseActive = false;
@@ -126,6 +127,17 @@ export class RealtimeSession {
     if (this.connected) this.sendSession();
   }
 
+  // Stop streaming the mic (e.g. while the payment screen is open). On pause,
+  // ~0.8 s of silence lets server VAD close any half-spoken turn.
+  setMicPaused(paused) {
+    if (paused === this.micPaused) return;
+    this.micPaused = paused;
+    if (paused && this.connected && !this.injecting) {
+      const silence = new Int16Array(Math.round(SAMPLE_RATE * 0.8));
+      this.send({ type: 'input_audio_buffer.append', audio: pcm16ToBase64(silence) });
+    }
+  }
+
   // Make the model speak now (after on-screen actions / safety-net alerts).
   // Higgs rejects a bare response.create when the assistant spoke last
   // ("No user input"), so the event goes in as a short text user item first.
@@ -217,7 +229,7 @@ export class RealtimeSession {
       const input = e.inputBuffer.getChannelData(0);
       this.micLevel = rms(input);
       // Pause the mic while a demo phrase is being injected so streams don't interleave.
-      if (!this.connected || this.injecting) return;
+      if (!this.connected || this.injecting || this.micPaused) return;
       this.send({ type: 'input_audio_buffer.append', audio: pcm16ToBase64(floatToPcm16(input)) });
     };
     this.micSource.connect(this.micNode);

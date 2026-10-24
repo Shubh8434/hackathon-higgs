@@ -188,6 +188,13 @@ input[type=file] { margin-top: 6px; color: var(--muted); font-size: 12px; max-wi
 .eb-form label.done input { border-color: var(--green); }
 .eb-note { margin-top: 10px; font-size: 12px; color: #ffb3b3; }
 
+/* ---------- Booking details (normal flow) ---------- */
+.details-panel { border: 2px solid var(--amber); }
+.details-panel.complete { border-color: var(--green); }
+.dp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.details-panel .eb-form label.awaiting { color: var(--amber); font-weight: 700; }
+.pay-paused { margin-top: 12px; padding: 8px 10px; border-radius: 10px; font-size: 12px; color: var(--amber); background: var(--amber-bg); }
+
 /* ---------- Conversation ---------- */
 .conversation { display: flex; flex-direction: column; gap: 12px; }
 .convo-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }

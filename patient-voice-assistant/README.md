@@ -55,8 +55,10 @@ Record a roughly 30-second screen capture of the whole flow and save it as `publ
    - Ava asks for name, address and phone, one at a time. The form fills in as you answer. You can also tap *"Name, address, phone"*.
 2. **Normal booking (1–2 min).** Click **↺ Reset demo**, then say *"I'd like to book a routine checkup."*
    - Dr. Patel is recommended, with three open times.
-   - Say *"10:30 tomorrow works."* A 5-minute hold starts and the payment screen opens. Tap **Done**.
-   - The cards fill in, the confirmed clip plays, and the receipt SMS arrives.
+   - Say *"10:30 tomorrow works"* or *"the first one."* Ava holds the slot (shown as a 30-minute range, e.g. 10:30 AM to 11:00 AM) and asks for name, address and phone, one at a time. The **Patient details** box highlights the field she's waiting for. The address is taken as said; she never asks for city or postal code.
+   - Ava reads all three back and asks *"Is that all correct?"* Say *yes*, or name what to fix.
+   - On *yes*, the payment screen opens and the conversation pauses (mic, demo phrases and typing are off). Tap **Done** to book or **Release hold** to pick another time; Ava then acknowledges.
+   - The cards fill in, the confirmed clip plays, and the receipt SMS arrives. The slot is held for 5 minutes in the background; the payment screen shows the countdown.
 3. **Barge-in (30 s).** While Ava is talking, start speaking. Her audio stops at once and the character switches to listening.
 
 Cost to quote: about $0.05–$0.10 per 5-minute call (Boson docs). The header shows a live session timer and cost estimate.
@@ -93,7 +95,7 @@ mic ─PCM16 24k─▶ wss://api.boson.ai/v1/realtime   POST /api/realtime/clien
 server.js            HTTP server: static files, Boson proxy, clinic API
 lib/env.js           .env loader
 lib/boson.js         Boson REST client (key stays server-side)
-lib/db.js            Mock clinic: doctors, slots, 5-min holds, pay, emergency pre-emption, SMS
+lib/db.js            Mock clinic: doctors, 30-min slots, 5-min holds, pay, emergency pre-emption, SMS
 lib/clips.js         Avatar clip definitions + render/cache
 scripts/render-clips.js
 public/index.html    Single-page UI

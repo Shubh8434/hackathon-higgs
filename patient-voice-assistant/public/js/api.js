@@ -13,6 +13,23 @@ async function call(method, url, body) {
     err.status = res.status;
     throw err;
   }
+  return withRanges(data);
+}
+
+const fmt = (mins) => `${Math.floor(mins / 60) % 12 || 12}:${String(mins % 60).padStart(2, '0')} ${Math.floor(mins / 60) >= 12 ? 'PM' : 'AM'}`;
+
+// Every booking gets its 30-minute range ("11:00 AM to 11:30 AM today"),
+// even from a server that doesn't send one.
+function withRanges(data) {
+  const fix = (b) => {
+    if (!b?.time || !b.day || b.range) return;
+    const [h, m] = b.time.split(':').map(Number);
+    b.range = `${fmt(h * 60 + m)} to ${fmt(h * 60 + m + 30)} ${b.day}`;
+  };
+  fix(data?.booking);
+  fix(data?.displaced);
+  for (const b of data?.bookings || []) fix(b);
+  for (const b of data?.state?.bookings || []) fix(b);
   return data;
 }
 

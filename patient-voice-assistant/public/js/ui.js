@@ -17,6 +17,13 @@ function formatTime(time) {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 
+// 30-minute appointment: "11:00 AM to 11:30 AM".
+function formatRange(time) {
+  const [h, m] = time.split(':').map(Number);
+  const end = h * 60 + m + 30;
+  return `${formatTime(time)} to ${formatTime(`${Math.floor(end / 60)}:${end % 60}`)}`;
+}
+
 // ---------------------------------------------------------------------------
 // Captions with keyword highlighting
 // ---------------------------------------------------------------------------
@@ -83,10 +90,10 @@ export function renderCards(s, doctor, holdRemainingMs) {
 
   let time = '';
   let timeSub = '';
-  if (booking) { time = booking.label; timeSub = booking.emergency ? 'Same-day emergency slot' : s.hold ? `On hold · ${fmtCountdown(holdRemainingMs)}` : 'Confirmed'; }
+  if (booking) { time = booking.range || booking.label; timeSub = booking.emergency ? 'Same-day emergency slot' : s.hold ? `On hold · ${fmtCountdown(holdRemainingMs)}` : 'Confirmed'; }
   else if (s.proposedSlotId) {
     const [, day, t] = s.proposedSlotId.split('|');
-    time = `${formatTime(t)} ${day}`;
+    time = `${formatRange(t)} ${day}`;
     timeSub = 'Proposed — say “yes” to hold';
   }
   card('#cardTime', time, timeSub, booking?.emergency ? 'filled danger' : time ? 'filled' : '');
@@ -99,7 +106,8 @@ export function renderCards(s, doctor, holdRemainingMs) {
 
   const pay = booking?.payment;
   const payText = { pending: 'Awaiting payment', paid: 'Paid ✓', waived: 'Waived' }[pay] || '';
-  const paySub = { pending: 'Tap Done on payment screen', paid: '$40 copay received', waived: 'Emergency — no charge' }[pay] || '';
+  const pendingSub = FIELDS.includes(s.awaiting) ? 'Collecting your details first' : s.awaiting === 'confirm' ? 'Confirm your details first' : 'Tap Done on payment screen';
+  const paySub = { pending: pendingSub, paid: '$40 copay received', waived: 'Emergency — no charge' }[pay] || '';
   card('#cardPayment', payText, paySub, pay === 'paid' ? 'filled good' : pay === 'waived' ? 'filled danger' : pay ? 'filled warn' : '');
 }
 
@@ -253,9 +261,9 @@ export function renderEmergency(s, doctor) {
   if (!on) return;
   $('#alertSource').textContent = `${SOURCE_LABEL[s.alert?.source] || ''}${s.alert?.phrase && s.alert.source !== 'manual' ? ` · “${s.alert.phrase}”` : ''}`;
   const b = s.emergency;
-  $('#alertSlot').textContent = b ? `${doctor(b.doctorId)?.name} · today ${formatTime(b.time)} · ${b.id}` : 'Reserving same-day slot…';
+  $('#alertSlot').textContent = b ? `${doctor(b.doctorId)?.name} · ${b.range} · ${b.id}` : 'Reserving same-day slot…';
   $('#alertDisplaced').textContent = s.displaced
-    ? `Pre-empted: ${s.displaced.patient.name || 'a normal booking'} moved ${formatTime(s.displaced.displacedFrom.time)} → ${s.displaced.label}`
+    ? `Pre-empted: ${s.displaced.patient.name || 'a normal booking'} moved ${formatTime(s.displaced.displacedFrom.time)} → ${s.displaced.range}`
     : '';
   for (const f of ['name', 'address', 'phone']) {
     const input = $(`#er_${f}`);
@@ -266,17 +274,46 @@ export function renderEmergency(s, doctor) {
 }
 
 // ---------------------------------------------------------------------------
-// Payment modal
+// Booking details form (normal flow): same highlight as the emergency form
+// ---------------------------------------------------------------------------
+const FIELDS = ['name', 'address', 'phone'];
+const detailsComplete = (s) => FIELDS.every((f) => s.patient[f]);
+
+export function renderDetails(s) {
+  const panel = $('#detailsPanel');
+  const on = s.mode !== 'emergency' && Boolean(s.hold || s.confirmed);
+  panel.classList.toggle('hidden', !on);
+  if (!on) return;
+  const complete = detailsComplete(s);
+  panel.classList.toggle('complete', complete);
+  $('#detailsNote').textContent = s.confirmed
+    ? 'Booked with these details.'
+    : s.awaiting === 'confirm' ? 'Final check: say "yes" if these are right, or tell Ava what to fix.'
+    : complete ? 'Confirmed. Tap Done on the payment screen.' : 'Check what Ava heard. Click a field to correct it.';
+  for (const f of FIELDS) {
+    const input = $(`#nd_${f}`);
+    if (document.activeElement !== input) input.value = s.patient[f] || '';
+    input.disabled = Boolean(s.confirmed);
+    input.closest('label').classList.toggle('awaiting', !s.confirmed && s.awaiting === f);
+    input.closest('label').classList.toggle('done', Boolean(s.patient[f]));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Payment modal: opens once the hold has name, address and phone
 // ---------------------------------------------------------------------------
 export function renderPayment(s, doctor, holdRemainingMs) {
   const modal = $('#payModal');
-  const open = Boolean(s.hold) && s.mode !== 'emergency';
+  const open = Boolean(s.hold) && s.mode !== 'emergency' && s.awaiting === 'payment';
   modal.classList.toggle('hidden', !open);
   if (!open) return;
   const d = doctor(s.hold.doctorId);
   $('#payDoctor').textContent = d ? `${d.name} · ${d.title}` : '';
-  $('#payTime').textContent = s.hold.label;
+  $('#payTime').textContent = s.hold.range;
   $('#payHoldId').textContent = s.hold.id;
+  $('#payName').textContent = s.patient.name || '—';
+  $('#payAddress').textContent = s.patient.address || '—';
+  $('#payPhone').textContent = s.patient.phone || '—';
   $('#payCountdown').textContent = fmtCountdown(holdRemainingMs);
   $('#payCountdown').classList.toggle('low', holdRemainingMs < 60_000);
 }

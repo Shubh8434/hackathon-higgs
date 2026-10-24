@@ -3,3 +3,5 @@ node_modules/
 clips/*.mp4
 clips/*.json
 .DS_Store
+# The repo-root Python .gitignore ignores lib/; this project's lib/ is source.
+!lib/

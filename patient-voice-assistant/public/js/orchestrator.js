@@ -10,7 +10,7 @@ import { api } from './api.js';
 import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
   parseTimes, matchSlot, isConfirmation, isBookingIntent, isPaymentDone, extractDetails,
-  SPECIALTY_DOCTOR,
+  parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, SPECIALTY_DOCTOR,
 } from './keywords.js';
 
 const FIELDS = ['name', 'address', 'phone'];
@@ -29,11 +29,13 @@ function fresh() {
     doctorId: null,
     doctorSource: null,
     proposedSlotId: null,
+    offeredSlotIds: [],
     hold: null,
     confirmed: null,
     emergency: null,
     displaced: null,
     patient: { name: '', address: '', phone: '' },
+    phoneBuffer: '', // digits of a phone number spoken across several turns
     awaiting: 'problem',
     reply: '',
     lastUserText: '',
@@ -75,6 +77,21 @@ export class Orchestrator {
     return this.doctor(id)?.freeSlots || [];
   }
 
+  // The times Ava last listed, still free; falls back to the first three.
+  offeredSlots(id) {
+    const free = this.freeSlots(id);
+    const offered = this.s.offeredSlotIds.map((sid) => free.find((x) => x.id === sid)).filter(Boolean);
+    return offered.length ? offered : free.slice(0, 3);
+  }
+
+  missingField() {
+    return FIELDS.find((f) => !this.s.patient[f]) || null;
+  }
+
+  collectingDetails() {
+    return Boolean(this.s.hold) && FIELDS.includes(this.s.awaiting);
+  }
+
   respond(text, { nudge = false, kind = 'info' } = {}) {
     this.s.reply = text;
     this.changed();
@@ -92,7 +109,7 @@ export class Orchestrator {
       if (!live) {
         s.hold = null;
         s.awaiting = 'time';
-        this.respond('Your 5-minute hold expired, so I released that slot. Would you like to pick another time?', { nudge: true });
+        this.respond('The reservation on that time ran out, so I released it. Would you like to pick another time?', { nudge: true });
       } else {
         s.hold = live;
       }
@@ -126,6 +143,11 @@ export class Orchestrator {
   async normalTurn(text) {
     const s = this.s;
     s.error = '';
+    if (this.collectingDetails()) {
+      if (isPaymentDone(text)) return this.respond(`Almost done, I just need a couple of details first. ${ASK[s.awaiting]}`);
+      return this.captureDetails(text);
+    }
+    if (s.hold && s.awaiting === 'confirm') return this.confirmTurn(text);
     if (s.hold && isPaymentDone(text)) return this.payNow();
 
     const spec = detectSpecialty(text);
@@ -141,6 +163,11 @@ export class Orchestrator {
       const times = parseTimes(text);
       const slot = matchSlot(times, this.freeSlots(s.doctorId));
       if (slot) return this.placeHold(slot.id, 'patient');
+      const choice = !picked && !s.hold ? parseChoice(text) : null;
+      if (choice !== null) {
+        const pick = this.offeredSlots(s.doctorId).at(choice);
+        if (pick) return this.placeHold(pick.id, 'patient');
+      }
       if (!picked && isConfirmation(text) && s.proposedSlotId) return this.placeHold(s.proposedSlotId, 'patient');
       if (times.length) {
         return this.respond(`Sorry, that time isn't open with ${this.doctor(s.doctorId).short}. ${this.offerTimes(s.doctorId)}`);
@@ -148,7 +175,7 @@ export class Orchestrator {
     }
 
     if (picked) return this.respond(this.offerLine(s.doctorId, s.doctorSource === 'symptom'));
-    if (s.confirmed) return this.respond(`You're booked with ${this.doctor(s.confirmed.doctorId).short} at ${s.confirmed.label}. Is there anything else I can help with?`);
+    if (s.confirmed) return this.respond(`You're booked with ${this.doctor(s.confirmed.doctorId).short} for ${s.confirmed.range}. Is there anything else I can help with?`);
     if (!s.doctorId && isBookingIntent(text)) {
       s.awaiting = 'problem';
       return this.respond("Of course. First, can you briefly describe the problem you'd like to be seen for?");
@@ -159,7 +186,9 @@ export class Orchestrator {
   }
 
   offerTimes(doctorId) {
-    const slots = this.freeSlots(doctorId).slice(0, 3).map((x) => x.label);
+    const offered = this.freeSlots(doctorId).slice(0, 3);
+    this.s.offeredSlotIds = offered.map((x) => x.id);
+    const slots = offered.map((x) => x.label);
     if (!slots.length) return 'There are no open times this week, sorry.';
     return `Open times are ${slots.slice(0, -1).join(', ')}${slots.length > 1 ? ' or ' : ''}${slots.at(-1)}. Which works for you?`;
   }
@@ -188,7 +217,8 @@ export class Orchestrator {
     this.changed();
   }
 
-  async placeHold(slotId, source) {
+  // source: 'patient' | 'screen' | 'assistant' (Ava announced a hold herself).
+  async placeHold(slotId, source, { nudge = source === 'screen' } = {}) {
     const s = this.s;
     if (s.hold?.slotId === slotId) return;
     if (s.hold) await api.release(s.hold.id).catch(() => {});
@@ -197,10 +227,14 @@ export class Orchestrator {
       s.hold = res.booking;
       s.doctorId = res.booking.doctorId;
       s.proposedSlotId = null;
-      s.awaiting = 'payment';
+      s.awaiting = this.missingField() || 'confirm';
       this.applyState(res.state);
       const d = this.doctor(res.booking.doctorId);
-      this.respond(`Great. I'm holding ${d.short} at ${res.booking.label} for 5 minutes. Please tap Done on the payment screen to confirm.`, { nudge: source === 'screen' });
+      const held = source === 'assistant' ? '' : `Great, I'm holding ${d.short} for you, ${res.booking.range}. `;
+      const next = s.awaiting === 'confirm'
+        ? this.detailsWrapUp()
+        : `To finish the booking I just need a few details. ${ASK[s.awaiting]}`;
+      this.respond(`${held}${next}`, { nudge });
     } catch (err) {
       s.hold = null;
       await this.refresh();
@@ -215,7 +249,7 @@ export class Orchestrator {
   // Un-queued body of pay(), safe to call from inside a queued turn.
   async payNow() {
     const s = this.s;
-    if (!s.hold) return;
+    if (!s.hold || s.awaiting !== 'payment') return;
     const res = await api.pay(s.hold.id);
     s.confirmed = res.booking;
     s.hold = null;
@@ -223,7 +257,7 @@ export class Orchestrator {
     this.applyState(res.state);
     this.hooks.playClip('confirmed');
     const d = this.doctor(res.booking.doctorId);
-    this.respond(`You're all set with ${d.short} at ${res.booking.label}. Your booking ID is ${res.booking.id}, and I've texted you a receipt.`, { nudge: true, kind: 'paid' });
+    this.respond(`You're all set with ${d.short}, ${res.booking.range}. Your booking ID is ${res.booking.id}, and I've texted you a receipt.`, { nudge: true, kind: 'paid' });
   }
 
   cancelHold() {
@@ -262,7 +296,7 @@ export class Orchestrator {
     const d = this.doctor(res.booking.doctorId);
     const ask = s.awaiting ? ASK[s.awaiting] : '';
     this.respond(
-      `This sounds like an emergency. If you're in danger right now, call emergency services, 911. I've reserved ${d.short}'s next same-day slot, ${formatTime(res.booking.time)} today, for you. ${ask}`.trim(),
+      `This sounds like an emergency. If you're in danger right now, call emergency services, 911. I've reserved ${d.short}'s next same-day slot, ${res.booking.range}, for you. ${ask}`.trim(),
       { nudge: source !== 'model', kind: 'emergency' }
     );
   }
@@ -272,16 +306,57 @@ export class Orchestrator {
     // Don't mistake a symptom description for a bare-name answer.
     const symptomatic = detectRedFlag(text) || detectSpecialty(text);
     const found = extractDetails(text, symptomatic ? null : s.awaiting);
-    const changed = await this.savePatient(found);
-    if (!changed && symptomatic) return; // the triggering sentence itself
-    if (!changed) {
-      return this.respond(s.awaiting ? `Sorry, I didn't catch that. ${ASK[s.awaiting]}` : this.emergencyWrapUp());
+    if (s.awaiting === 'phone' && !found.phone) {
+      const digits = phoneDigits(text);
+      if (digits) {
+        s.phoneBuffer += digits;
+        if (s.phoneBuffer.length < 10) {
+          if (!this.hooks.isLive()) this.respond('Got it, go on.');
+          return;
+        }
+        found.phone = formatPhone(s.phoneBuffer.slice(0, 15));
+      }
     }
-    if (s.awaiting) {
+    const changed = await this.savePatient(found);
+    if (!changed && symptomatic && s.mode === 'emergency') return; // the triggering sentence itself
+    const asking = FIELDS.includes(s.awaiting);
+    if (!changed) {
+      return this.respond(asking ? `Sorry, I didn't catch that. ${ASK[s.awaiting]}` : this.detailsWrapUp());
+    }
+    if (asking) {
       const first = s.patient.name.split(' ')[0];
       return this.respond(`Thank you${first ? `, ${first}` : ''}. ${ASK[s.awaiting]}`);
     }
-    this.respond(this.emergencyWrapUp());
+    this.respond(this.detailsWrapUp());
+  }
+
+  detailsWrapUp() {
+    if (this.s.mode === 'emergency') return this.emergencyWrapUp();
+    const { name, address, phone } = this.s.patient;
+    return `Thank you, ${name.split(' ')[0]}. Just a final check: your name is ${name}, your address is ${address}, and your phone number is ${phone}. Is that all correct?`;
+  }
+
+  // Answer to the final check. Yes → payment screen (chat pauses); a
+  // correction → update and read back again.
+  async confirmTurn(text) {
+    const s = this.s;
+    const found = extractDetails(text, null);
+    const digits = phoneDigits(text);
+    if (!found.phone && /\b(?:phone|number)\b/i.test(text) && digits.length >= 7) found.phone = formatPhone(digits.slice(0, 15));
+    if (await this.savePatient(found)) return this.respond(this.detailsWrapUp());
+    if (isConfirmation(text)) {
+      s.awaiting = 'payment';
+      this.changed();
+      return this.respond('Great. The payment screen is open now. Tap Done to confirm your booking, or Release hold if you want a different time.');
+    }
+    const t = text.toLowerCase();
+    const field = /\bname\b/.test(t) ? 'name' : /\baddress\b/.test(t) ? 'address' : /\b(?:phone|number)\b/.test(t) ? 'phone' : null;
+    if (field) {
+      s.awaiting = field;
+      this.changed();
+      return this.respond(`No problem, let's fix that. ${ASK[field]}`);
+    }
+    return this.respond('No problem. Which one should I fix: your name, your address, or your phone number?');
   }
 
   emergencyWrapUp() {
@@ -290,7 +365,7 @@ export class Orchestrator {
     if (!b) return 'Help is on the way. Stay with me.';
     const d = this.doctor(b.doctorId);
     const first = s.patient.name.split(' ')[0];
-    return `Thank you${first ? `, ${first}` : ''}. ${d.name} is expecting you today at ${formatTime(b.time)}. Your emergency booking ID is ${b.id}, and the details are on your phone. If anything gets worse, call 911 immediately.`;
+    return `Thank you${first ? `, ${first}` : ''}. ${d.name} is expecting you ${b.range}. Your emergency booking ID is ${b.id}, and the details are on your phone. If anything gets worse, call 911 immediately.`;
   }
 
   // Returns true if anything new was captured.
@@ -303,7 +378,8 @@ export class Orchestrator {
     }
     if (!Object.keys(updates).length) return false;
     Object.assign(s.patient, updates);
-    s.awaiting = FIELDS.find((f) => !s.patient[f]) || null;
+    if (updates.phone) s.phoneBuffer = '';
+    s.awaiting = this.missingField() || (s.mode !== 'emergency' && s.hold ? 'confirm' : null);
     this.changed();
     const id = s.emergency?.id || s.hold?.id;
     if (id) {
@@ -313,11 +389,14 @@ export class Orchestrator {
     return true;
   }
 
-  // Manual edit from the emergency details form.
+  // Manual edit from the emergency or booking details form.
   setPatientField(field, value) {
     return this.queue(async () => {
+      const wasAsking = FIELDS.includes(this.s.awaiting);
       const changed = await this.savePatient({ [field]: value });
-      if (changed && this.s.mode === 'emergency' && !this.s.awaiting) this.respond(this.emergencyWrapUp());
+      if (!changed || !wasAsking || FIELDS.includes(this.s.awaiting)) return;
+      if (this.s.mode === 'emergency') this.respond(this.emergencyWrapUp());
+      else if (this.s.hold) this.respond(this.detailsWrapUp(), { nudge: true });
     });
   }
 
@@ -330,7 +409,19 @@ export class Orchestrator {
         const flag = detectModelEmergency(text);
         if (flag) return this.triggerEmergency('model', flag, s.lastUserText || text);
       }
-      if (s.mode === 'emergency') {
+      const normalHold = s.mode !== 'emergency' && s.hold;
+      if (s.mode === 'emergency' || normalHold) {
+        // Ava's read-back wins over our own transcript parsing.
+        await this.savePatient(extractReadback(text));
+        // Ava moved on to payment right after the patient said yes to the final check.
+        if (normalHold && isPayPrompt(text) && s.awaiting === 'confirm' && isConfirmation(s.lastUserText)) { s.awaiting = 'payment'; this.changed(); }
+        // Ava asked for city/province anyway: steer her straight back on track.
+        if (s.patient.address && /\b(?:city|province|postal code|postcode|zip code)\b/i.test(text)) {
+          const next = FIELDS.includes(s.awaiting) ? ASK[s.awaiting] : this.detailsWrapUp();
+          return this.respond(`Actually, the address you gave is all I need. ${next}`, { nudge: true });
+        }
+      }
+      if (s.mode === 'emergency' || this.collectingDetails()) {
         // Track which detail the model just asked for, so a bare reply is understood.
         const t = text.toLowerCase();
         const asked = [['name', t.lastIndexOf('name')], ['address', t.lastIndexOf('address')], ['phone', Math.max(t.lastIndexOf('phone'), t.lastIndexOf('number'))]]
@@ -345,7 +436,14 @@ export class Orchestrator {
       if (s.doctorId && !s.hold) {
         const times = parseTimes(text);
         const slot = times.length === 1 ? matchSlot(times, this.freeSlots(s.doctorId)) : null;
+        // Ava said she's holding a specific time: make the screen match.
+        if (slot && isHoldAnnouncement(text)) {
+          const askedDetail = /\b(?:name|address|phone)\b/i.test(text);
+          return this.placeHold(slot.id, 'assistant', { nudge: !askedDetail });
+        }
         if (slot) { s.proposedSlotId = slot.id; this.changed(); }
+        const listed = times.map((x) => matchSlot([x], this.freeSlots(s.doctorId))).filter(Boolean);
+        if (listed.length > 1) s.offeredSlotIds = listed.map((x) => x.id);
       }
     });
   }
@@ -361,8 +459,9 @@ export class Orchestrator {
     const lines = [
       'You are Ava, the friendly voice booking assistant for Maple Clinic. Speak naturally, warmly and briefly: 1-2 short sentences per turn. Never use lists or markdown.',
       'RULE: Always have the patient describe their problem first, then book. Recommend the doctor whose specialty fits, offer up to three of their open times, and let the patient pick.',
-      'When the patient picks a time, say you are holding it for 5 minutes and ask them to tap Done on the payment screen. Never invent booking IDs, prices or times that are not listed below; the screen shows IDs.',
-      'EMERGENCIES: if the patient mentions chest pain, trouble breathing, stroke signs, heavy bleeding, fainting, a severe allergic reaction, suicidal thoughts, or says it is urgent, say clearly: "This sounds like an emergency. If you are in danger, call emergency services, 911." Then tell them a same-day emergency slot has been reserved and collect their full name, home address and phone number, one at a time. Stay calm and reassuring.',
+      'When the patient picks a time, say you are holding it for them and give the appointment as a 30-minute range (for example "11:00 AM to 11:30 AM today"); never mention how long the hold lasts. Then collect their full name, home address and phone number, one question at a time. Accept the address exactly as the patient says it: never ask for a city, province, postal code or unit. After all three are collected, do a final check: read them back in this form: "Just a final check: your name is ..., your address is ..., and your phone number is ... Is that all correct?" (phone as digits). If the patient corrects something, update it and read all three back again. Only when the patient says yes, tell them the payment screen is open and to tap Done to confirm (or Release hold for a different time); then stay quiet until the screen reports what they tapped. Never invent booking IDs, prices or times that are not listed below; the screen shows IDs.',
+      'ADDRESS RULE: whatever the patient says for their address is final, even if it is only a street name and number. NEVER ask for a city, province, state, postal code, ZIP or unit, and never ask them to complete the address. After the address, go straight to the phone number.',
+      'EMERGENCIES: if the patient mentions chest pain, trouble breathing, stroke signs, heavy bleeding, fainting, a severe allergic reaction, suicidal thoughts, a baby with a fever, a head injury, poisoning, sudden confusion, severe abdominal pain, choking, a bone sticking out or a limb bent the wrong way, a bad burn, bleeding during pregnancy, or feeling like they are dying, or says it is urgent (but not "not urgent" or "urgent care"), say clearly: "This sounds like an emergency. If you are in danger, call emergency services, 911." Then tell them a same-day emergency slot has been reserved and collect their full name, home address and phone number, one at a time (never ask for city or postal code). Stay calm and reassuring.',
       '',
       'DOCTORS:',
       docs,
@@ -373,14 +472,22 @@ export class Orchestrator {
     if (s.mode === 'emergency') {
       const b = s.emergency;
       const d = b && this.doctor(b.doctorId);
-      lines.push(`- EMERGENCY MODE. ${b ? `Emergency booking ${b.id} with ${d.name} today at ${formatTime(b.time)} (payment waived).` : 'Reserving an emergency slot now.'}`);
+      lines.push(`- EMERGENCY MODE. ${b ? `Emergency booking ${b.id} with ${d.name}, ${b.range} (payment waived).` : 'Reserving an emergency slot now.'}`);
       lines.push(`- Collected: name=${s.patient.name || 'MISSING'}, address=${s.patient.address || 'MISSING'}, phone=${s.patient.phone || 'MISSING'}.`);
+      if (s.patient.address) lines.push('- The address is complete as given. Do not ask for city, province or postal code.');
       lines.push(s.awaiting ? `- Ask for the ${s.awaiting} next.` : '- All details collected: confirm the booking ID and reassure the patient.');
     } else {
       if (s.problem) lines.push(`- Problem described: "${s.problem}".`);
       if (s.doctorId) lines.push(`- Selected doctor: ${this.doctor(s.doctorId)?.name}.`);
-      if (s.hold) lines.push(`- Slot ON HOLD (5 minutes): ${s.hold.label}, hold ${s.hold.id}. Waiting for the patient to tap Done on the payment screen.`);
-      if (s.confirmed) lines.push(`- BOOKED and paid: ${this.doctor(s.confirmed.doctorId)?.name} at ${s.confirmed.label}, booking ID ${s.confirmed.id}. A receipt SMS was sent.`);
+      if (s.hold) {
+        lines.push(`- Slot ON HOLD: ${s.hold.range}, hold ${s.hold.id}. Do not mention how long the hold lasts.`);
+        lines.push(`- Collected: name=${s.patient.name || 'MISSING'}, address=${s.patient.address || 'MISSING'}, phone=${s.patient.phone || 'MISSING'}.`);
+        if (s.patient.address) lines.push('- The address is complete as given. Do not ask for city, province or postal code.');
+        if (this.collectingDetails()) lines.push(`- Ask for the ${s.awaiting} next. Then do the final check of all three details.`);
+        else if (s.awaiting === 'confirm') lines.push('- All details collected. Do the final check now: read all three back and ask "Is that all correct?". Do NOT mention payment until the patient says yes.');
+        else lines.push('- The patient confirmed their details. The payment screen is open and the conversation is paused. Say nothing more until the screen reports Done or Release hold.');
+      }
+      if (s.confirmed) lines.push(`- BOOKED and paid: ${this.doctor(s.confirmed.doctorId)?.name}, ${s.confirmed.range}, booking ID ${s.confirmed.id}. A receipt SMS was sent.`);
       if (!s.problem && !s.doctorId) lines.push('- Nothing booked yet. Ask what brings them in today.');
     }
     if (s.reply) lines.push('', `SUGGESTED NEXT LINE (adapt naturally): "${s.reply}"`);

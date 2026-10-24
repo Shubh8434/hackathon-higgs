@@ -10,7 +10,7 @@ import { AvatarClips } from './avatar.js';
 import { Orchestrator } from './orchestrator.js';
 import {
   $, $$, addBubble, updateBubble, clearCaptions, renderCharacter, renderCards, renderDoctors,
-  renderSchedule, renderPhone, renderEmergency, renderPayment, resetRenderMemory,
+  renderSchedule, renderPhone, renderEmergency, renderDetails, renderPayment, resetRenderMemory,
 } from './ui.js';
 
 const PATIENT_VOICE = 'marcus'; // voice used to "speak" demo phrases into the session
@@ -54,11 +54,18 @@ let assistantBubble = null;
 let suppressUntil = 0; // drop the transcript of an injected demo phrase
 let pendingNudge = null; // { kind, reason: 'busy' | 'user-turn' }
 let userSpeaking = false;
+let paymentPause = false; // payment screen open: no patient input until Done / Release
+
+function dropUserBubble() {
+  if (userBubble) { userBubble.remove(); userBubble = null; }
+  userText = '';
+}
 
 const rt = new RealtimeSession({
   onStatus: (s) => setRtStatus(s),
   onSpeechStopped: () => { userSpeaking = false; },
   onSpeechStarted: () => {
+    if (paymentPause) return;
     // Barge-in: silence everything the assistant side is playing.
     userSpeaking = true;
     voice.stop();
@@ -68,7 +75,7 @@ const rt = new RealtimeSession({
     if (!userBubble) userBubble = addBubble('user', '', { pending: true });
   },
   onUserDelta: (delta) => {
-    if (Date.now() < suppressUntil) return;
+    if (Date.now() < suppressUntil || paymentPause) return;
     userText += delta;
     if (!userBubble) userBubble = addBubble('user', '', { pending: true });
     updateBubble(userBubble, userText);
@@ -80,6 +87,7 @@ const rt = new RealtimeSession({
       if (userBubble) { userBubble.remove(); userBubble = null; }
       return;
     }
+    if (paymentPause) { dropUserBubble(); return; }
     if (userBubble) updateBubble(userBubble, text, { pending: false });
     else addBubble('user', text);
     userBubble = null;
@@ -183,7 +191,7 @@ let lastPhrase = '';
 
 async function sendPatientText(text, badge = 'demo') {
   text = text.trim();
-  if (!text) return;
+  if (!text || paymentPause) return;
   lastPhrase = text;
   $('#replayBtn').disabled = false;
   $('#replayBtn').title = `Replay: “${text}”`;
@@ -239,8 +247,22 @@ function render() {
   renderSchedule(snap, doctorById);
   renderPhone(snap);
   renderEmergency(s, doctorById);
+  renderDetails(s);
   renderPayment(s, doctorById, holdRemaining());
+  setPaymentPause(Boolean(s.hold) && s.mode !== 'emergency' && s.awaiting === 'payment');
   if (s.error) showError(s.error);
+}
+
+// While the payment screen is up the conversation waits: mic, demo phrases and
+// typing are off until the patient taps Done or Release hold.
+function setPaymentPause(on) {
+  if (on === paymentPause) return;
+  paymentPause = on;
+  rt.setMicPaused(on);
+  if (on) { userSpeaking = false; dropUserBubble(); }
+  $$('.demo [data-phrase], #replayBtn, #typeInput, #typeForm button').forEach((n) => { n.disabled = on || (n.id === 'replayBtn' && !lastPhrase); });
+  $('#typeInput').placeholder = on ? 'Paused: tap Done or Release hold on the payment screen…' : 'Type as the patient and press Enter…';
+  if (rt.connected) setRtStatus(on ? 'paused: waiting for the payment screen' : 'live, speak now');
 }
 
 // Character state machine: alert > speaking > listening > idle.
@@ -248,7 +270,7 @@ function characterLoop() {
   let state = 'idle';
   if (orch.s.mode === 'emergency') state = 'alert';
   else if (rt.speaking || voice.speaking || avatar.playing) state = 'speaking';
-  else if (rt.connected) state = 'listening';
+  else if (rt.connected && !paymentPause) state = 'listening';
   renderCharacter(state);
 
   const level = Math.min(1, rt.micLevel * 12);
@@ -343,6 +365,7 @@ function bind() {
   $('#manualEmergency').addEventListener('click', () => orch.manualEmergency());
   for (const f of ['name', 'address', 'phone']) {
     $(`#er_${f}`).addEventListener('change', (e) => orch.setPatientField(f, e.target.value));
+    $(`#nd_${f}`).addEventListener('change', (e) => orch.setPatientField(f, e.target.value));
   }
   $('#resetBtn').addEventListener('click', async () => {
     voice.stop();

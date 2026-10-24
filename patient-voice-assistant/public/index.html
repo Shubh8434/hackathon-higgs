@@ -105,6 +105,18 @@
         <div class="eb-note">If you are in danger, call emergency services (911) now.</div>
       </div>
 
+      <div class="panel details-panel hidden" id="detailsPanel">
+        <div class="dp-head">
+          <strong>Patient details</strong>
+          <span class="muted small" id="detailsNote">Check what Ava heard. Click a field to correct it.</span>
+        </div>
+        <div class="eb-form">
+          <label>Name <input id="nd_name" type="text" placeholder="listening…" /></label>
+          <label>Address <input id="nd_address" type="text" placeholder="listening…" /></label>
+          <label>Phone <input id="nd_phone" type="text" placeholder="listening…" /></label>
+        </div>
+      </div>
+
       <div class="panel conversation">
         <div class="convo-controls">
           <button class="primary" id="connectBtn">🎙 Start voice session</button>
@@ -201,11 +213,14 @@
         <h3>Confirm &amp; pay</h3>
         <span class="countdown" id="payCountdown">5:00</span>
       </div>
-      <div class="muted small">Your slot is held for 5 minutes.</div>
+      <div class="muted small">Complete payment before the timer runs out to keep this slot.</div>
       <dl class="pay-dl">
         <dt>Doctor</dt><dd id="payDoctor"></dd>
         <dt>Time</dt><dd id="payTime"></dd>
         <dt>Hold</dt><dd id="payHoldId" class="mono"></dd>
+        <dt>Patient</dt><dd id="payName"></dd>
+        <dt>Address</dt><dd id="payAddress"></dd>
+        <dt>Phone</dt><dd id="payPhone"></dd>
         <dt>Copay</dt><dd>$40.00</dd>
       </dl>
       <div class="mock-card">
@@ -213,6 +228,7 @@
         <div class="mock-row"><div class="mock-field">12/29</div><div class="mock-field">•••</div></div>
         <div class="muted small">Mock payment — no real charge.</div>
       </div>
+      <div class="pay-paused">Conversation paused. Tap <strong>Done</strong> to book, or <strong>Release hold</strong> to pick another time.</div>
       <div class="row-btns">
         <button class="primary big" id="payDone">Done</button>
         <button class="ghost" id="payCancel">Release hold</button>

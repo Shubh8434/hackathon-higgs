@@ -75,3 +75,10 @@ test('reset restores the seeded schedule', () => {
   db.reset();
   assert.ok(db.snapshot().bookings.every((b) => !b.emergency));
 });
+
+test('slotRange: 30-minute appointment ranges', async () => {
+  const { slotRange } = await import('../lib/db.js');
+  assert.equal(slotRange('today', '11:00'), '11:00 AM to 11:30 AM today');
+  assert.equal(slotRange('today', '11:30'), '11:30 AM to 12:00 PM today');
+  assert.equal(slotRange('tomorrow', '15:30'), '3:30 PM to 4:00 PM tomorrow');
+});
