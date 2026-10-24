@@ -458,18 +458,19 @@ export class Orchestrator {
 
     if (s.hold) { await api.release(s.hold.id).catch(() => {}); s.hold = null; }
     const conversationId = await this.hooks.conversationId?.();
-    const res = await api.emergency(emergencyDoctorFor(text || phrase), text || phrase, s.patient, { conversationId, specialty: detectSpecialty(text || ''), alertSource: source, alertPhrase: phrase });
+    // Route on everything the patient has said, not just the trigger sentence
+    // ("very emergency condition" alone says nothing about the hip).
+    const context = [s.problem, text || phrase].filter(Boolean).join('. ');
+    let doctorId = emergencyDoctorFor(context);
+    if (doctorId === 'patel' && s.doctorId && s.doctorSource !== 'screen') doctorId = s.doctorId;
+    const res = await api.emergency(doctorId, context, s.patient, { conversationId, specialty: detectSpecialty(context), alertSource: source, alertPhrase: phrase });
     s.emergency = res.booking;
     s.displaced = res.displaced;
     s.doctorId = res.booking.doctorId;
     this.applyState(res.state);
 
-    const d = this.doctor(res.booking.doctorId);
     const ask = s.awaiting ? ASK[s.awaiting] : '';
-    this.respond(
-      `This sounds like an emergency. If you're in danger right now, call emergency services, 911. I've reserved ${d.short}'s earliest open slot, ${res.booking.range}, for you. ${ask}`.trim(),
-      { nudge: source !== 'model', kind: 'emergency' }
-    );
+    this.respond(`${this.emergencyLine(res.booking)} ${ask}`.trim(), { nudge: source !== 'model', kind: 'emergency' });
   }
 
   async captureDetails(text) {
@@ -530,13 +531,28 @@ export class Orchestrator {
     return this.respond('No problem. Which one should I fix: your name, your address, or your phone number?');
   }
 
+  // What Ava says when the emergency is triggered, by triage outcome.
+  emergencyLine(b) {
+    const d = this.doctor(b.doctorId);
+    const cover = b.coveringFor ? `, covering for ${this.doctor(b.coveringFor).short}` : '';
+    if (b.triage === 'er-followup') {
+      const why = b.closedReason === 'sunday' ? 'The clinic is closed on Sundays' : 'The clinic is closed for today';
+      return `This sounds like an emergency. ${why}, so please call 911 or go to the nearest emergency room right now. I've also booked you a priority follow-up with ${d.name}, ${b.range}.`;
+    }
+    return `This sounds like an emergency. If you're in danger right now, call 911. I've given you ${d.name}'s earliest priority slot${cover}, ${b.range}.`;
+  }
+
   emergencyWrapUp() {
     const s = this.s;
     const b = s.emergency;
     if (!b) return 'Help is on the way. Stay with me.';
     const d = this.doctor(b.doctorId);
     const first = s.patient.name.split(' ')[0];
-    return `Thank you${first ? `, ${first}` : ''}. ${d.name} is expecting you ${b.range}. Your emergency booking ID is ${b.id}, and the details are on your phone. If anything gets worse, call 911 immediately.`;
+    const thanks = `Thank you${first ? `, ${first}` : ''}.`;
+    if (b.triage === 'er-followup') {
+      return `${thanks} Please call 911 or go to the nearest emergency room now. Your follow-up with ${d.name} is ${b.range}, booking ID ${b.id}, and the details are on your phone.`;
+    }
+    return `${thanks} ${d.name} is expecting you ${b.range}. Your emergency booking ID is ${b.id}, and the details are on your phone. If anything gets worse, call 911 immediately.`;
   }
 
   // Returns true if anything new was captured.
@@ -658,10 +674,10 @@ export class Orchestrator {
       'You are Ava, the friendly voice booking assistant for Maple Clinic. Speak naturally, warmly and briefly: 1-2 short sentences per turn. Never use lists or markdown.',
       `CURRENT DATE AND TIME: ${nowText} (clinic local time). Use this for everything about dates: "today", "tomorrow" and weekday names are relative to it.`,
       `CLINIC HOURS: ${this.snapshot?.clinicHours || 'Monday to Friday, 9 AM to 12 PM and 2 PM to 4 PM'}. Appointments are 30 minutes.`,
-      'RULE: Always have the patient describe their problem first, then book. Recommend the doctor whose specialty fits, offer up to three of their NEAREST open times from now (never list more than three times in one turn) (the lists below are sorted soonest first), and let the patient pick. Never offer a time in the past, on a weekend, or one that is not listed. The OPEN TIMES list is the only truth about availability: a weekday is open if it appears there. Never say a doctor or the clinic is "closed on Wednesdays" (or any weekday); if a specific date is missing from the list, say that date has no open times. Never say you are holding or booking a time unless the NEXT LINE says so. If the patient asks for a particular day, the morning/afternoon, or "after/before" a time, only offer open times that match; if none match, say so and offer the nearest alternatives. When the patient gives only a time ("3:30 then"), it means the day you were just discussing. A question like "do you have anything after 3?" is NOT a choice: never hold a time until the patient picks one. If the patient wants a different day or time after you are holding one, offer alternatives; the screen moves the hold when they pick, and their details are kept. Say days relative to today ("tomorrow", "on Monday") and add the date when it is more than a week away.',
+      'RULE: Always have the patient describe their problem first, then book. Recommend the doctor whose specialty fits, offer up to three of their NEAREST open times from now (never list more than three times in one turn) (the lists below are sorted soonest first), and let the patient pick. Never offer a time in the past, on a Sunday, or one that is not listed. Saturdays are normal working days. The OPEN TIMES list is the only truth about availability: a weekday is open if it appears there. Never say a doctor or the clinic is "closed on Wednesdays" (or any weekday); if a specific date is missing from the list, say that date has no open times. Never say you are holding or booking a time unless the NEXT LINE says so. If the patient asks for a particular day, the morning/afternoon, or "after/before" a time, only offer open times that match; if none match, say so and offer the nearest alternatives. When the patient gives only a time ("3:30 then"), it means the day you were just discussing. A question like "do you have anything after 3?" is NOT a choice: never hold a time until the patient picks one. If the patient wants a different day or time after you are holding one, offer alternatives; the screen moves the hold when they pick, and their details are kept. Say days relative to today ("tomorrow", "on Monday") and add the date when it is more than a week away.',
       'When the patient picks a time, say you are holding it for them and give the appointment as a 30-minute range (for example "11:00 AM to 11:30 AM today"); never mention how long the hold lasts. Then collect their full name, home address and phone number, one question at a time. Accept the address exactly as the patient says it: never ask for a city, province, postal code or unit. After all three are collected, do a final check: read them back in this form: "Just a final check: your name is ..., your address is ..., and your phone number is ... Is that all correct?" (phone as digits). If the patient corrects something, update it and read all three back again. Only when the patient says yes, tell them the payment screen is open and to tap Done to confirm (or Release hold for a different time); then stay quiet until the screen reports what they tapped. Never invent booking IDs, prices or times that are not listed below; the screen shows IDs.',
       'ADDRESS RULE: whatever the patient says for their address the first time is final, even if it is only a number, only a street, misheard or unusual. NEVER ask any follow-up about the address: no street name, house number, city, province, state, postal code, ZIP, unit, spelling or "full address". Never ask them to repeat or complete it. Acknowledge briefly and go straight to the phone number.',
-      'EMERGENCIES: if the patient mentions chest pain, trouble breathing, stroke signs, heavy bleeding, fainting, a severe allergic reaction, suicidal thoughts, a baby with a fever, a head injury, poisoning, sudden confusion, severe abdominal pain, choking, a bone sticking out or a limb bent the wrong way, a bad burn, bleeding during pregnancy, or feeling like they are dying, or says it is urgent (but not "not urgent" or "urgent care"), say clearly: "This sounds like an emergency. If you are in danger, call emergency services, 911." Then tell them the earliest emergency slot has been reserved and collect their full name, home address and phone number, one at a time (never ask for city or postal code). Stay calm and reassuring.',
+      'EMERGENCIES: if the patient mentions chest pain, trouble breathing, stroke signs, heavy bleeding, fainting, a severe allergic reaction, suicidal thoughts, a baby with a fever, a head injury, poisoning, sudden confusion, severe abdominal pain, choking, a bone sticking out or a limb bent the wrong way, a bad burn, bleeding during pregnancy, or feeling like they are dying, or says it is urgent (but not "not urgent" or "urgent care"), say clearly: "This sounds like an emergency. If you are in danger, call emergency services, 911." Then tell them what the clinic screen reserved (a same-day priority slot, or, when the clinic is closed, an ER visit now plus a priority follow-up) and collect their full name, home address and phone number, one at a time (never ask for city or postal code). Stay calm and reassuring.',
       '',
       'DOCTORS:',
       docs,
@@ -674,6 +690,8 @@ export class Orchestrator {
       const b = s.emergency;
       const d = b && this.doctor(b.doctorId);
       lines.push(`- EMERGENCY MODE. ${b ? `Emergency booking ${b.id} with ${d.name}, ${b.range} (payment waived).` : 'Reserving an emergency slot now.'}`);
+      if (b?.triage === 'er-followup') lines.push(`- The clinic is CLOSED right now (${b.closedReason === 'sunday' ? 'Sunday' : "today's hours are over"}). Tell the patient to call 911 or go to the nearest emergency room now; the booking above is a priority FOLLOW-UP, not an appointment for today.`);
+      else if (b) lines.push(`- Same-day priority slot${b.coveringFor ? ` (${d.name} is covering for ${this.doctor(b.coveringFor)?.name}, who is not in today)` : ''}. If they are in danger before then, call 911.`);
       lines.push(`- Collected: name=${s.patient.name || 'MISSING'}, address=${s.patient.address || 'MISSING'}, phone=${s.patient.phone || 'MISSING'}.`);
       lines.push(s.patient.address ? '- The address is complete as given. Do not ask for city, province or postal code.' : '- When the patient gives an address, accept it exactly as said. Never ask for city, province or postal code.');
       lines.push(s.awaiting ? `- Ask for the ${s.awaiting} next.` : '- All details collected: confirm the booking ID and reassure the patient.');

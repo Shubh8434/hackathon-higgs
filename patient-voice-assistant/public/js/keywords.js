@@ -21,7 +21,7 @@ const RED_FLAGS = [
   /sudden(?:ly)? confus\w*|disoriented|doesn'?t know where (?:he|she|they) (?:is|are)/,
   /(?:severe|extreme|unbearable|terrible|excruciating) (?:abdominal|stomach|belly) pain|(?:abdominal|stomach|belly) pain (?:is )?(?:severe|unbearable|extreme|excruciating)/,
   /chok(?:ing|ed|es)\b/,
-  /bone (?:is )?(?:sticking|poking) out|(?:arm|leg|wrist|ankle|finger) (?:is )?(?:bent|twisted|pointing) (?:the )?wrong (?:way|direction)|(?:open|compound) fracture|dislocated/,
+  /bone (?:is )?(?:sticking|poking) out|(?:arm|leg|wrist|ankle|finger) (?:is )?(?:bent|twisted|pointing) (?:the )?wrong (?:way|direction)|(?:open|compound) fractures?|dislocat(?:ed|ion|ions|ing)\b|popped out of (?:its |the )?socket/,
   /(?:bad|major|serious|big|third[- ]degree|second[- ]degree) burns?\b|burned (?:badly|my face|all over)|on fire/,
   /pregnan\w*.{0,40}\bbleed\w*|\bbleed\w*.{0,40}pregnan\w*/,
   /i'?m dying|(?:feel like|think) i'?m (?:going to die|dying)|going to die/,
@@ -79,7 +79,7 @@ export function emergencyDoctorFor(text) {
   const t = norm(text);
   if (SYMPTOM_MAP[0][1].test(t) || /\b(?:baby|infant|newborn)\b/.test(t)) return 'rahman';
   if (/chest|heart|palpitation/.test(t)) return 'chen';
-  if (/bone (?:is )?(?:sticking|poking) out|fracture|dislocated|broken (?:arm|leg|bone|wrist|ankle)|(?:bent|twisted|pointing) (?:the )?wrong/.test(t)) return 'kim';
+  if (/bone (?:is )?(?:sticking|poking) out|fracture|dislocat\w*|out of (?:its |the )?socket|broken (?:arm|leg|bone|wrist|ankle|hip)|(?:bent|twisted|pointing) (?:the )?wrong/.test(t)) return 'kim';
   return 'patel';
 }
 
@@ -462,7 +462,7 @@ export function isPayPrompt(text) {
 // Caption highlighting → [{ text, cls }] where cls is 'kw-red' | 'kw-amber' |
 // 'kw-blue' | null. Red > amber > blue when patterns compete.
 // ---------------------------------------------------------------------------
-const HL_RED = "call emergency services|emergency services|call 911|911|emergency|ambulance|severe(?:ly)?|urgent(?:ly)?|chest pain|chest pressure|can'?t breathe|cannot breathe|short(?:ness)? of breath|trouble breathing|difficulty breathing|heart attack|stroke|seizure|unconscious|passed out|bleeding|immediately|right away|life[- ]threatening|head injury|concussion|poison(?:ed|ing)?|choking|dislocated|disoriented|overdose";
+const HL_RED = "call emergency services|emergency services|call 911|911|emergency|ambulance|severe(?:ly)?|urgent(?:ly)?|chest pain|chest pressure|can'?t breathe|cannot breathe|short(?:ness)? of breath|trouble breathing|difficulty breathing|heart attack|stroke|seizure|unconscious|passed out|bleeding|immediately|right away|life[- ]threatening|head injury|concussion|poison(?:ed|ing)?|choking|dislocat(?:ed|ions?)|disoriented|overdose";
 const HL_AMBER = "credit card|co-?pay|payment|payments|paying|paid|pay|card|fees?|costs?|price|charged?|receipt|insurance|billing|invoice|deposit|refund|done button";
 const HL_BLUE = "(?:Dr\\.?|Doctor) (?:(?:Sarah|James|Maria|David|Aisha) )?(?:Patel|Chen|Lopez|Kim|Rahman)|Patel|Chen|Lopez|Kim|Rahman|\\d{1,2}[:.]\\d{2}(?:\\s*[ap]\\.?m\\b\\.?)?|\\d{1,2}\\s*[ap]\\.?m\\b\\.?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?: thirty| o'?clock)|half past \\w+|noon|today|tomorrow|this morning|this afternoon|o'?clock|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\\.? \\d{1,2}(?:st|nd|rd|th)?";
 

@@ -236,3 +236,10 @@ test('dayFocus: the one day a sentence is about', () => {
   assert.equal(dayFocus('10:30 AM on Monday or 2:30 PM on Tuesday', N), 'multi');
   assert.equal(dayFocus('Okay, three thirty p.m.', N), null);
 });
+
+test('dislocations are emergencies routed to orthopedics', () => {
+  assert.ok(detectRedFlag('Oh God! I think I have a hip and major joint dislocations.'));
+  assert.ok(detectRedFlag('my shoulder popped out of its socket'));
+  assert.equal(emergencyDoctorFor('I have a hip dislocation'), 'kim');
+  assert.equal(emergencyDoctorFor('Oh God! I think I have a hip and major joint dislocations.. But I think I am feeling very emergency condition'), 'kim');
+});

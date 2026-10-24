@@ -270,7 +270,13 @@ export function renderEmergency(s, doctor) {
   if (!on) return;
   $('#alertSource').textContent = `${SOURCE_LABEL[s.alert?.source] || ''}${s.alert?.phrase && s.alert.source !== 'manual' ? ` · “${s.alert.phrase}”` : ''}`;
   const b = s.emergency;
-  $('#alertSlot').textContent = b ? `${doctor(b.doctorId)?.name} · ${b.range} · ${b.id}` : 'Reserving same-day slot…';
+  $('#alertSlot').textContent = b
+    ? `${b.triage === 'er-followup' ? 'Follow-up: ' : ''}${doctor(b.doctorId)?.name}${b.coveringFor ? ` (covering for ${doctor(b.coveringFor)?.short})` : ''} · ${fullRange(b)} · ${b.id}`
+    : 'Reserving the earliest slot…';
+  $('#alertAdvice').textContent = b?.triage === 'er-followup'
+    ? `Clinic closed ${b.closedReason === 'sunday' ? 'on Sundays' : 'for today'}: call 911 or go to the nearest emergency room now.`
+    : b ? 'Same-day priority slot. If it gets worse before then, call 911.' : '';
+  $('#alertAdvice').classList.toggle('er', b?.triage === 'er-followup');
   $('#alertDisplaced').textContent = s.displaced
     ? `Pre-empted: ${s.displaced.patient.name || 'a normal booking'} moved ${formatTime(s.displaced.displacedFrom.time)} → ${s.displaced.range}`
     : '';
@@ -332,9 +338,9 @@ export function renderPayment(s, doctor, holdRemainingMs) {
 // ---------------------------------------------------------------------------
 const CAL_TITLE = {
   open: 'Open times available', full: 'Fully booked / unavailable', off: 'Doctor not working',
-  closed: 'Clinic closed (weekend)', past: 'In the past', beyond: 'Not bookable yet (more than 90 days ahead)',
+  closed: 'Clinic closed (Sunday)', past: 'In the past', beyond: 'Not bookable yet (more than 90 days ahead)',
 };
-const SLOT_TITLE = { open: 'Open: click to book', booked: 'Booked', held: 'On hold', unavailable: 'Unavailable', past: 'Time has passed' };
+const SLOT_TITLE = { open: 'Open: click to book', booked: 'Booked', held: 'On hold', unavailable: 'Unavailable', past: 'Time has passed', emergency: 'Emergency booking' };
 
 export function renderCalendar(cal, { selectedDate, disabled, onDay, onSlot }) {
   const grid = $('#calGrid');

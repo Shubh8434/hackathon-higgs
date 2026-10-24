@@ -11,8 +11,10 @@ function clock(start = MON_8AM) {
 }
 
 test('availability is fixed: same doctor/date/time always gives the same answer', () => {
-  assert.equal(scheduleStatus('patel', '2026-10-31'), 'closed'); // Saturday
   assert.equal(scheduleStatus('patel', '2026-11-01'), 'closed'); // Sunday
+  for (const d of ['patel', 'chen', 'lopez', 'kim', 'rahman']) {
+    for (const sat of ['2026-10-31', '2026-11-07', '2026-11-14', '2026-11-21']) assert.equal(scheduleStatus(d, sat), 'open', `${d} works Saturday ${sat}`);
+  }
   for (const d of ['patel', 'chen', 'rahman']) {
     assert.equal(scheduleStatus(d, '2026-11-04', '10:00'), scheduleStatus(d, '2026-11-04', '10:00'));
   }
@@ -26,7 +28,7 @@ test('free slots start from now, skip the past, weekends and blocked times', () 
   for (const s of free) {
     assert.ok(s.date > '2026-10-26' || s.time > '10:15', `${s.id} is in the past`);
     assert.equal(scheduleStatus('kim', s.date, s.time), 'open');
-    assert.notEqual(new Date(`${s.date}T12:00`).getDay() % 6, 0, 'no weekends');
+    assert.notEqual(new Date(`${s.date}T12:00`).getDay(), 0, 'no Sundays');
   }
 });
 
@@ -56,7 +58,7 @@ test('hold → pay confirms and sends a receipt SMS', () => {
 test('holds on unavailable or past slots are refused', () => {
   const db = createDb({ now: clock(new Date(2026, 9, 26, 10, 15).getTime()).now });
   assert.throws(() => db.hold({ slotId: 'patel|2026-10-26|09:00' }), /isn't available \(past\)/);
-  assert.throws(() => db.hold({ slotId: 'patel|2026-10-31|10:00' }), /isn't available \(closed\)/);
+  assert.throws(() => db.hold({ slotId: 'patel|2026-11-01|10:00' }), /isn't available \(closed\)/);
 });
 
 test('holds expire after 5 minutes and free the slot', () => {
@@ -73,21 +75,53 @@ test('holds expire after 5 minutes and free the slot', () => {
   assert.ok(db.hold({ slotId: slot.id }));
 });
 
-test('emergency takes the earliest slot and moves the seeded booking there', () => {
-  const db = createDb({ now: clock().now });
-  const seeded = db.snapshot().bookings.find((b) => b.patient.name === 'Robert Hall');
-  assert.ok(seeded, 'Robert Hall is seeded into Dr. Chen\'s first open slot');
+const at = (y, m, d, h, min = 0) => new Date(y, m - 1, d, h, min).getTime();
 
+test('emergency (Mon–Sat, specialist in today): nearest slot, pre-empting the booking there', () => {
+  const db = createDb({ now: clock(at(2026, 10, 27, 8)).now }); // Tuesday 8 AM; Dr. Chen works
+  const seeded = db.snapshot().bookings.find((b) => b.patient.name === 'Robert Hall');
+  assert.equal(seeded.date, '2026-10-27');
   const { booking, displaced } = db.emergency({ doctorId: 'chen', reason: 'chest pain' });
+  assert.equal(booking.triage, 'same-day');
+  assert.equal(booking.doctorId, 'chen');
   assert.equal(booking.slotId, seeded.slotId);
   assert.equal(booking.payment, 'waived');
-  assert.ok(booking.id.startsWith('ER-'));
   assert.equal(displaced.id, seeded.id);
   assert.deepEqual(displaced.displacedFrom, { date: seeded.date, time: seeded.time });
-  assert.equal(db.freeSlots('chen', { limit: 1 })[0].id > displaced.slotId || true, true);
-
-  const kinds = db.snapshot().sms.map((s) => s.kind);
+  const kinds = db.snapshot().sms.map((x) => x.kind);
   assert.ok(kinds.includes('emergency') && kinds.includes('displaced'));
+  assert.equal(db.availability('chen', '2026-10').days.find((d) => d.date === '2026-10-27').slots.find((x) => x.time === booking.time).status, 'emergency');
+});
+
+test('emergency: specialist off today → a doctor who is in covers, same day', () => {
+  assert.equal(scheduleStatus('chen', '2026-10-26'), 'off');
+  const db = createDb({ now: clock(at(2026, 10, 26, 8)).now }); // Monday; Dr. Chen is off
+  const { booking } = db.emergency({ doctorId: 'chen' });
+  assert.equal(booking.triage, 'same-day');
+  assert.equal(booking.date, '2026-10-26');
+  assert.equal(booking.coveringFor, 'chen');
+  assert.equal(booking.doctorId, 'patel');
+});
+
+test('emergency on Saturday: same-day like any working day', () => {
+  const db = createDb({ now: clock(at(2026, 10, 31, 1)).now }); // Saturday 1 AM
+  const { booking } = db.emergency({ doctorId: 'kim' });
+  assert.equal(booking.triage, 'same-day');
+  assert.equal(booking.date, '2026-10-31');
+});
+
+test('emergency on Sunday or after hours: ER advice + priority follow-up next working day', () => {
+  const db = createDb({ now: clock(at(2026, 11, 1, 10)).now }); // Sunday
+  const sun = db.emergency({ doctorId: 'chen' }).booking;
+  assert.equal(sun.triage, 'er-followup');
+  assert.equal(sun.closedReason, 'sunday');
+  assert.equal(sun.date, '2026-11-02');
+  assert.match(db.snapshot().sms.at(-1).body, /closed now\. Call 911 or go to the nearest emergency room.*follow-up/);
+
+  const satEvening = createDb({ now: clock(at(2026, 10, 31, 17)).now }).emergency({ doctorId: 'patel' }).booking;
+  assert.equal(satEvening.triage, 'er-followup');
+  assert.equal(satEvening.closedReason, "today's clinic hours are over");
+  assert.equal(satEvening.date, '2026-11-02'); // skips Sunday
 });
 
 test('availability(): a month view with day and slot statuses', () => {
@@ -95,7 +129,8 @@ test('availability(): a month view with day and slot statuses', () => {
   const cal = db.availability('patel', '2026-10');
   assert.equal(cal.days.length, 31);
   assert.equal(cal.days.find((d) => d.date === '2026-10-25').status, 'past');
-  assert.equal(cal.days.find((d) => d.date === '2026-10-31').status, 'closed');
+  assert.equal(cal.days.find((d) => d.date === '2026-10-31').status, 'open'); // Saturday
+  assert.equal(cal.days.find((d) => d.date === '2026-10-25').status, 'past');
   const open = cal.days.find((d) => d.status === 'open');
   assert.ok(open.slots.some((x) => x.status === 'open'));
   assert.throws(() => db.availability('nobody', '2026-10'), /Unknown doctor/);

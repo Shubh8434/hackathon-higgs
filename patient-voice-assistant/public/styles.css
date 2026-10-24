@@ -343,3 +343,7 @@ mark.kw-red { background: var(--red-bg); color: var(--red); }
 .cal-slot:disabled { cursor: default; }
 .cal-slot.ss-booked, .cal-slot.ss-held { text-decoration: line-through; opacity: .55; }
 .cal-slot.ss-unavailable, .cal-slot.ss-past { opacity: .35; }
+
+.eb-advice { margin-top: 10px; font-weight: 700; }
+.eb-advice.er { padding: 8px 10px; border-radius: 10px; background: var(--red); color: #fff; }
+.cal-slot.ss-emergency { border-color: var(--red); color: #ffb3b3; text-decoration: line-through; }

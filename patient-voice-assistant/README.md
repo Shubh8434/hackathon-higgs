@@ -116,4 +116,4 @@ npm test
 - real Stripe or Twilio
 - call history
 
-The schedule is a real calendar from the current date and time, 90 days ahead: Monday to Friday, 9–12 and 2–4, 30-minute slots. Each doctor's days off and blocked times are pseudo-random but fixed (hashed from doctor, date and time), so they're the same every run. Ava's instructions always include the current date and time. **↺ Reset demo** reseeds the demo bookings into each doctor's first open slots.
+The schedule is a real calendar from the current date and time, 90 days ahead: Monday to Saturday, 9–12 and 2–4, 30-minute slots (closed Sundays). Each doctor's days off and blocked times are pseudo-random but fixed (hashed from doctor, date and time), so they're the same every run. Ava's instructions always include the current date and time. **↺ Reset demo** reseeds the demo bookings into each doctor's first open slots.

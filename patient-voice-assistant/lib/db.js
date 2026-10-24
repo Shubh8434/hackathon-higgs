@@ -1,4 +1,4 @@
-// In-memory mock clinic on a real calendar: 5 doctors, Mon–Fri 9–12 and 2–4 in
+// In-memory mock clinic on a real calendar: 5 doctors, Mon–Sat 9–12 and 2–4 in
 // 30-minute slots, 90 days ahead of "now". Each doctor's days off and blocked
 // times come from a hash of (doctor, date, time), so availability is random-
 // looking but fixed — the same every run, like a hardcoded schedule. Holds,
@@ -9,7 +9,7 @@ export const HOLD_MS = 5 * 60 * 1000;
 export const SLOT_MINUTES = 30;
 export const HORIZON_DAYS = 90; // how far ahead the calendar goes
 export const SNAPSHOT_DAYS = 14; // open slots sent with every state poll
-export const CLINIC_HOURS = 'Monday to Friday, 9:00 AM to 12:00 PM and 2:00 PM to 4:00 PM (closed weekends)';
+export const CLINIC_HOURS = 'Monday to Saturday, 9:00 AM to 12:00 PM and 2:00 PM to 4:00 PM (closed Sundays)';
 
 export const DOCTORS = [
   { id: 'patel', name: 'Dr. Sarah Patel', short: 'Dr. Patel', specialty: 'general', title: 'General Practice' },
@@ -104,8 +104,9 @@ export function fullRange(date, time) {
 }
 
 // ---------------------------------------------------------------------------
-// Fixed "random" schedule: weekends closed, ~12% doctor days off, ~30% of the
-// remaining slots blocked (meetings, surgery, admin). Pure function of inputs.
+// Fixed "random" schedule: Sundays closed, every doctor works Saturdays, ~12%
+// weekday days off, ~30% of slots blocked (meetings, surgery, admin). Pure
+// function of its inputs, so it's the same every run.
 // ---------------------------------------------------------------------------
 function hash01(str) {
   let h = 2166136261;
@@ -117,8 +118,8 @@ function hash01(str) {
 
 export function scheduleStatus(doctorId, date, time = null) {
   const wd = toDate(date).getDay();
-  if (wd === 0 || wd === 6) return 'closed';
-  if (hash01(`off|${doctorId}|${date}`) < 0.12) return 'off';
+  if (wd === 0) return 'closed';
+  if (wd !== 6 && hash01(`off|${doctorId}|${date}`) < 0.12) return 'off';
   if (time && hash01(`blk|${doctorId}|${date}|${time}`) < 0.3) return 'unavailable';
   return 'open';
 }
@@ -191,7 +192,7 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     const base = scheduleStatus(doctorId, date, time);
     if (base !== 'open') return base;
     const b = bookingAt(slotId(doctorId, date, time));
-    if (b) return b.status === 'held' ? 'held' : 'booked';
+    if (b) return b.emergency ? 'emergency' : b.status === 'held' ? 'held' : 'booked';
     return 'open';
   }
 
@@ -277,7 +278,7 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     const { doctorId, date, time } = parseSlotId(sid);
     if (!doctor(doctorId)) throw httpError(400, `Unknown doctor in slot ${sid}`);
     const st = slotStatus(doctorId, date, time);
-    if (st === 'booked' || st === 'held') throw httpError(409, 'That slot was just taken — pick another time.');
+    if (st === 'booked' || st === 'held' || st === 'emergency') throw httpError(409, 'That slot was just taken — pick another time.');
     if (st !== 'open') throw httpError(409, `That time isn't available (${st}) — pick another time.`);
     const b = insert({
       id: newId('PVA'),
@@ -320,20 +321,42 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     return b;
   }
 
-  // Emergency: take the doctor's earliest upcoming slot. If a normal booking
-  // already sits there, move it to the doctor's next open slot.
+  // Earliest slot a doctor can give an emergency: their nearest working slot
+  // from now, even if a normal booking sits there (it gets moved).
+  function emergencySlot(doctorId) {
+    for (const { date, time } of upcoming()) {
+      if (isPast(date, time) || scheduleStatus(doctorId, date, time) !== 'open') continue;
+      const existing = bookingAt(slotId(doctorId, date, time));
+      if (!existing || !existing.emergency) return { date, time, sid: slotId(doctorId, date, time), existing };
+    }
+    return null;
+  }
+
+  // Emergency triage:
+  //  same-day   — a slot is left today (Mon–Sat): the specialist if they're in
+  //               today, else whoever is (GP first). Pre-empts a booking if needed.
+  //  er-followup — clinic closed now (Sunday, or today's hours are over): the
+  //               patient is told to call 911 / go to the ER, and gets a
+  //               priority follow-up at the next working slot.
   function emergency({ doctorId = 'patel', reason = 'Emergency', patient = {}, meta = {} } = {}) {
     sweep();
     if (!doctor(doctorId)) throw httpError(400, `Unknown doctor ${doctorId}`);
+    const t = today();
+    const sunday = toDate(t).getDay() === 0;
 
-    let target = null;
-    for (const { date, time } of upcoming()) {
-      if (isPast(date, time) || scheduleStatus(doctorId, date, time) !== 'open') continue;
-      const sid = slotId(doctorId, date, time);
-      const existing = bookingAt(sid);
-      if (!existing || !existing.emergency) { target = { sid, existing }; break; }
+    let chosen = doctorId;
+    let target = emergencySlot(doctorId);
+    let coveringFor = null;
+    if (!target || target.date !== t) {
+      // Specialist isn't in today: whoever is, GP first.
+      for (const id of ['patel', ...DOCTORS.map((d) => d.id)].filter((id, i, a) => id !== doctorId && a.indexOf(id) === i)) {
+        const alt = emergencySlot(id);
+        if (alt && alt.date === t) { chosen = id; target = alt; coveringFor = doctorId; break; }
+      }
     }
-    if (!target) throw httpError(409, `${doctor(doctorId).short} has no capacity left.`);
+    if (!target) throw httpError(409, 'No emergency capacity left on the calendar.');
+    const triage = target.date === t ? 'same-day' : 'er-followup';
+    const closedReason = triage === 'same-day' ? null : sunday ? 'sunday' : "today's clinic hours are over";
 
     const ex = target.existing;
     if (ex) bookings.delete(ex.id);
@@ -345,18 +368,21 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
       status: 'confirmed',
       payment: 'waived',
       emergency: true,
+      triage,
+      closedReason,
+      coveringFor,
       reason,
       patient: { name: '', phone: '', address: '', ...patient },
       meta,
     });
-    const d = doctor(doctorId);
+    const d = doctor(chosen);
 
     let displaced = null;
     if (ex && ex.status === 'held') {
       record('released', ex, { reason: 'Slot taken by an emergency' });
       log('released', `Hold ${ex.id} released for emergency`);
     } else if (ex) {
-      const next = freeSlots(doctorId, { limit: 1 })[0];
+      const next = freeSlots(chosen, { limit: 1 })[0];
       const fromLabel = label(ex);
       if (next) {
         displaced = insert({ ...ex, slotId: next.id, displaced: true, displacedFrom: { date: ex.date, time: ex.time } });
@@ -368,12 +394,16 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
       }
     }
 
-    const alert = sendSms('patient', `Maple Clinic EMERGENCY: ${d.name} is expecting you ${fullRange(b.date, b.time)}. Booking ID ${b.id}. If symptoms worsen, call emergency services (911) immediately.`, 'emergency');
+    const body = triage === 'same-day'
+      ? `Maple Clinic EMERGENCY: ${d.name} is expecting you ${fullRange(b.date, b.time)} (priority slot). Booking ID ${b.id}. If symptoms worsen, call 911 immediately.`
+      : `Maple Clinic EMERGENCY: The clinic is closed now. Call 911 or go to the nearest emergency room immediately. Priority follow-up booked with ${d.name}, ${fullRange(b.date, b.time)}. Booking ID ${b.id}.`;
+    const alert = sendSms('patient', body, 'emergency');
     record('emergency', b, {
       sms: alert.body,
+      triage, closedReason, coveringFor,
       displaced: displaced ? { bookingId: displaced.id, patient: displaced.patient.name, from: fullRange(displaced.displacedFrom.date, displaced.displacedFrom.time), to: fullRange(displaced.date, displaced.time) } : null,
     });
-    log('emergency', `EMERGENCY ${b.id} — ${d.short} ${label(b)}${displaced ? ' (pre-empted a normal booking)' : ''}`);
+    log('emergency', `EMERGENCY ${b.id} — ${d.short} ${label(b)} · ${triage === 'same-day' ? 'same-day priority' : 'ER advised + follow-up'}${coveringFor ? ` (covering for ${doctor(coveringFor).short})` : ''}${displaced ? ' (pre-empted a normal booking)' : ''}`);
     return { booking: b, displaced };
   }
 
@@ -385,10 +415,8 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
       if (typeof patient[k] === 'string' && patient[k].trim()) b.patient[k] = patient[k].trim();
     }
     const changed = ['name', 'phone', 'address'].filter((k) => b.patient[k] !== before[k]);
-    if (changed.length) {
-      record('details', b, { changed });
-      log('info', `${b.id} details updated: ${changed.join(', ')}`);
-    }
+    // Saved to the bookings database only; too noisy for the dashboard log.
+    if (changed.length) record('details', b, { changed });
     return b;
   }
 

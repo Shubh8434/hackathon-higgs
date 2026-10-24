@@ -51,7 +51,15 @@ export function createBookingRecords({ file, now = () => Date.now() }) {
         doctor: { id: doc.id, name: doc.name, title: doc.title },
         slot: slotOf(b, now()),
         payment: { status: b.payment, amount: 0 },
-        emergency: b.emergency ? { detectedBy: meta.alertSource || null, phrase: meta.alertPhrase || '', preempted: null } : null,
+        emergency: b.emergency ? {
+          detectedBy: meta.alertSource || null,
+          phrase: meta.alertPhrase || '',
+          triage: b.triage || null, // 'same-day' | 'er-followup'
+          advice: b.triage === 'er-followup' ? 'Clinic closed: told to call 911 / go to the ER; priority follow-up booked' : 'Same-day priority slot',
+          closedReason: b.closedReason || null,
+          coveringFor: b.coveringFor || null,
+          preempted: null,
+        } : null,
         sms: [],
         createdAt: now(),
         updatedAt: now(),
@@ -73,7 +81,7 @@ export function createBookingRecords({ file, now = () => Date.now() }) {
       released: extra.reason || 'Hold released',
       expired: 'Hold expired before payment',
       confirmed: 'Paid $40 copay, booking confirmed',
-      emergency: `Emergency slot ${r.slot.range} with ${r.doctor.name}${extra.displaced ? `; moved ${extra.displaced.patient || extra.displaced.bookingId} to ${extra.displaced.to}` : ''}`,
+      emergency: `${b.triage === 'er-followup' ? 'ER advised; priority follow-up' : 'Same-day emergency slot'} ${r.slot.range} with ${r.doctor.name}${extra.displaced ? `; moved ${extra.displaced.patient || extra.displaced.bookingId} to ${extra.displaced.to}` : ''}`,
       moved: `Moved from ${extra.from} to ${extra.to}${extra.reason ? ` (${extra.reason})` : ''}`,
       details: `Updated ${(extra.changed || []).join(', ')}`,
     }[kind] || kind;
