@@ -4,13 +4,14 @@
 // Inputs:  patient transcript (live + final), assistant transcript, UI clicks.
 // Outputs: clinic API calls (hold / pay / emergency), a suggested next line
 //          (spoken via TTS offline, injected into instructions when live),
-//          avatar clip cues, and onChange() for the UI.
+//          and onChange() for the UI.
 
 import { api } from './api.js';
 import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
   parseTimes, matchSlot, isConfirmation, isBookingIntent, isPaymentDone, extractDetails,
-  parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, cleanAddress, isAddressFollowUp, SPECIALTY_DOCTOR,
+  parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, cleanAddress, isAddressFollowUp,
+  parseDate, parseDayPart, isoDate, parseTimeConstraint, isQuestion, dayFocus, SPECIALTY_DOCTOR,
 } from './keywords.js';
 
 const FIELDS = ['name', 'address', 'phone'];
@@ -29,7 +30,8 @@ function fresh() {
     doctorId: null,
     doctorSource: null,
     proposedSlotId: null,
-    offeredSlotIds: [],
+    offeredSlots: [], // the times Ava last listed: [{ id, time, date, label }]
+    proposedLabel: '',
     hold: null,
     confirmed: null,
     emergency: null,
@@ -50,7 +52,7 @@ export function formatTime(time) {
 
 export class Orchestrator {
   constructor(hooks) {
-    this.hooks = hooks; // { onChange, say, playClip, isLive, nudge }
+    this.hooks = hooks; // { onChange, say, isLive, nudge, now, conversationId }
     this.s = fresh();
     this.snapshot = null;
     this.busy = Promise.resolve();
@@ -77,11 +79,156 @@ export class Orchestrator {
     return this.doctor(id)?.freeSlots || [];
   }
 
-  // The times Ava last listed, still free; falls back to the first three.
+  now() {
+    return this.hooks.now?.() ?? Date.now();
+  }
+
+  // The times Ava last listed; falls back to the nearest three.
   offeredSlots(id) {
-    const free = this.freeSlots(id);
-    const offered = this.s.offeredSlotIds.map((sid) => free.find((x) => x.id === sid)).filter(Boolean);
-    return offered.length ? offered : free.slice(0, 3);
+    const offered = (this.s.offeredSlots || []).filter((x) => x.id.startsWith(`${id}|`));
+    return offered.length ? offered : this.freeSlots(id).slice(0, 3);
+  }
+
+  // "today" | "tomorrow" | "on Monday" | "on Tuesday, Nov 3"
+  onDay(date, capital = false) {
+    const today = isoDate(new Date(this.now()));
+    const d = new Date(`${date}T12:00:00`);
+    const diff = Math.round((d - new Date(`${today}T12:00:00`)) / 86_400_000);
+    const wd = d.toLocaleDateString('en-US', { weekday: 'long' });
+    const w = diff === 0 ? 'today' : diff === 1 ? 'tomorrow'
+      : `on ${diff > 1 && diff < 7 ? wd : `${wd}, ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}`;
+    return capital ? w[0].toUpperCase() + w.slice(1) : w;
+  }
+
+  // Open slots for one date, straight from the clinic calendar (any date
+  // within the 90-day horizon, not just the next two weeks).
+  async daySlots(doctorId, date) {
+    const cal = await api.availability(doctorId, date.slice(0, 7));
+    const day = cal.days.find((x) => x.date === date);
+    return (day?.slots || []).filter((x) => x.status === 'open')
+      .map((x) => ({ id: x.id, doctorId, date, time: x.time, label: `${formatTime(x.time)} ${this.onDay(date)}` }));
+  }
+
+  // Open slots on a date and/or part of day, soonest first.
+  async openSlots(doctorId, { date = null, part = null, constraint = null } = {}) {
+    let list = date ? await this.daySlots(doctorId, date) : this.freeSlots(doctorId);
+    if (part === 'morning') list = list.filter((x) => x.time < '12:00');
+    if (part === 'afternoon') list = list.filter((x) => x.time >= '12:00');
+    if (constraint?.kind === 'after') list = list.filter((x) => x.time > constraint.time);
+    if (constraint?.kind === 'from') list = list.filter((x) => x.time >= constraint.time);
+    if (constraint?.kind === 'before') list = list.filter((x) => x.time < constraint.time);
+    return list;
+  }
+
+  // An offer line for a requested day / part of day / "after 3", falling back
+  // to the nearest times that still fit the part of day and constraint.
+  async offerFor(doctorId, { date = null, part = null, constraint = null } = {}) {
+    const list = await this.openSlots(doctorId, { date, part, constraint });
+    if (list.length) return this.offerTimes(doctorId, list, { date });
+    const when = [
+      date ? this.onDay(date) : '',
+      part ? `in the ${part}` : '',
+      constraint ? `${constraint.kind === 'before' ? 'before' : 'after'} ${formatTime(constraint.time)}` : '',
+    ].filter(Boolean).join(' ');
+    const other = date ? await this.openSlots(doctorId, { part, constraint }) : [];
+    return `${this.doctor(doctorId).short} has nothing open ${when}. ${this.offerTimes(doctorId, other.length ? other : undefined)}`;
+  }
+
+  // Part of day / "after 3" from this turn, or remembered from an earlier one
+  // when this turn only names a day ("after 3?" … "Wednesday then").
+  timePref(text, date) {
+    const part = parseDayPart(text);
+    const constraint = parseTimeConstraint(text);
+    if (part || constraint) { this.s.timePref = { part, constraint }; return { part, constraint }; }
+    return date && this.s.timePref ? this.s.timePref : { part: null, constraint: null };
+  }
+
+  // Where a spoken time is looked up: the date said in this sentence, else the
+  // day being discussed ("Thursday?" … "3:30 then"), else the soonest one.
+  async slotPool(doctorId, date) {
+    const day = date || this.s.focusDate;
+    return day ? this.daySlots(doctorId, day) : this.freeSlots(doctorId);
+  }
+
+  // Ava said she's holding a specific time. If it's open, make the screen
+  // match; if it isn't, correct her out loud so the patient isn't misled.
+  // Returns true if it acted.
+  async checkAnnouncedHold(text) {
+    const s = this.s;
+    const now = this.now();
+    const focus = dayFocus(text, now);
+    const times = parseTimes(text, now);
+    if (times.length !== 1 || focus === 'multi') return false;
+    const date = focus || times[0].date || null;
+    const h = s.hold;
+    if (h && h.time === times[0].time && (!date || h.date === date)) return false; // matches the hold
+    // Payment screen is open: the hold can't move; restate the real time.
+    if (h && s.awaiting === 'payment') {
+      this.respond(`Sorry, a correction: your appointment is ${h.range} with ${this.doctor(h.doctorId).short}, as shown on the payment screen.`, { nudge: true });
+      return true;
+    }
+    const slot = matchSlot([{ time: times[0].time, date }], await this.slotPool(s.doctorId, date));
+    if (slot) {
+      await this.placeHold(slot.id, 'assistant', { nudge: !/\b(?:name|address|phone)\b/i.test(text) });
+      return true;
+    }
+    const day = date || s.focusDate;
+    const said = `${formatTime(times[0].time)}${day ? ` ${this.onDay(day)}` : ''}`;
+    const keep = s.hold ? ` Your appointment is still ${s.hold.range}.` : '';
+    const alt = s.hold ? '' : ` ${await this.offerFor(s.doctorId, { date: day })}`;
+    this.respond(`Sorry, I need to correct myself: ${said} is not available with ${this.doctor(s.doctorId).short}.${keep}${alt}`, { nudge: true });
+    return true;
+  }
+
+  // A time the patient asked about: confirm before holding it.
+  propose(slot) {
+    Object.assign(this.s, { proposedSlotId: slot.id, proposedLabel: slot.label });
+    this.respond(`Yes, ${slot.label} is open with ${this.doctor(slot.doctorId || this.s.doctorId).short}. Shall I book it for you?`);
+  }
+
+  // While a slot is held: a new day or time moves the hold (details are kept).
+  // Returns true if the turn was about changing the time.
+  async rescheduleTurn(text) {
+    const s = this.s;
+    const now = this.now();
+    const date = parseDate(text, now);
+    const { part, constraint } = this.timePref(text, date);
+    if (s.proposedSlotId && isConfirmation(text)) { await this.placeHold(s.proposedSlotId, 'patient'); return true; }
+    // Mid address/phone, only an explicit change counts ("Thursday instead?"),
+    // so "I live at 22…" or a phone number isn't mistaken for a time.
+    if (s.awaiting === 'phone' || s.awaiting === 'address') {
+      const explicit = /\b(?:change|instead|different|another|move|rather|actually|switch|reschedule)\b/i.test(text) || isQuestion(text);
+      if (!(explicit && (date || constraint || parseDayPart(text)))) return false;
+    }
+    const times = parseTimes(text, now);
+    if (date) s.focusDate = date;
+    if (times.length && !parseTimeConstraint(text)) {
+      const pool = await this.slotPool(s.doctorId, date);
+      const slot = matchSlot(times, pool);
+      if (slot && slot.id !== s.hold.slotId) {
+        if (isQuestion(text)) { this.propose(slot); return true; }
+        await this.placeHold(slot.id, 'patient');
+        return true;
+      }
+      if (!slot) {
+        s.rescheduleOffer = true;
+        const day = date || s.focusDate;
+        const asked = `${formatTime(times[0].time)}${day ? ` ${this.onDay(day)}` : ''}`;
+        this.respond(`Sorry, ${asked} isn't available with ${this.doctor(s.doctorId).short}. ${await this.offerFor(s.doctorId, { date: day, part, constraint })}`);
+        return true;
+      }
+    }
+    if (s.rescheduleOffer) {
+      const choice = parseChoice(text);
+      const pick = choice !== null ? this.offeredSlots(s.doctorId).at(choice) : null;
+      if (pick) { await this.placeHold(pick.id, 'patient'); return true; }
+    }
+    if (date || constraint || (part && /\b(?:change|instead|different|another|move|book|rather)\b/i.test(text))) {
+      s.rescheduleOffer = true;
+      this.respond(`Sure, we can change the time. ${await this.offerFor(s.doctorId, { date, part, constraint })}`);
+      return true;
+    }
+    return false;
   }
 
   missingField() {
@@ -143,6 +290,9 @@ export class Orchestrator {
   async normalTurn(text) {
     const s = this.s;
     s.error = '';
+    s.reply = ''; // never let Ava repeat the previous turn's line
+    // A different day/time while a slot is held (before payment) moves the hold.
+    if (s.hold && s.awaiting !== 'payment' && await this.rescheduleTurn(text)) return;
     if (this.collectingDetails()) {
       if (isPaymentDone(text)) return this.respond(`Almost done, I just need a couple of details first. ${ASK[s.awaiting]}`);
       return this.captureDetails(text);
@@ -159,10 +309,18 @@ export class Orchestrator {
     if (doc && doc !== s.doctorId) { this.setDoctor(doc, 'patient'); picked = true; }
     else if (spec && !s.doctorId) { this.setDoctor(SPECIALTY_DOCTOR[spec], 'symptom'); picked = true; }
 
+    const now = this.now();
+    const date = parseDate(text, now);
+    const { part, constraint } = this.timePref(text, date);
+    if (date) s.focusDate = date;
     if (s.doctorId && !s.confirmed) {
-      const times = parseTimes(text);
-      const slot = matchSlot(times, this.freeSlots(s.doctorId));
-      if (slot) return this.placeHold(slot.id, 'patient');
+      const times = parseTimeConstraint(text) ? [] : parseTimes(text, now);
+      if (times.length) {
+        const pool = await this.slotPool(s.doctorId, date);
+        const slot = matchSlot(times, pool);
+        // "Do you have 3 PM Wednesday?" → confirm first; "3 PM Wednesday works" → hold.
+        if (slot) return isQuestion(text) ? this.propose(slot) : this.placeHold(slot.id, 'patient');
+      }
       const choice = !picked && !s.hold ? parseChoice(text) : null;
       if (choice !== null) {
         const pick = this.offeredSlots(s.doctorId).at(choice);
@@ -170,11 +328,13 @@ export class Orchestrator {
       }
       if (!picked && isConfirmation(text) && s.proposedSlotId) return this.placeHold(s.proposedSlotId, 'patient');
       if (times.length) {
-        return this.respond(`Sorry, that time isn't open with ${this.doctor(s.doctorId).short}. ${this.offerTimes(s.doctorId)}`);
+        const day = date || s.focusDate;
+        return this.respond(`Sorry, ${formatTime(times[0].time)}${day ? ` ${this.onDay(day)}` : ''} isn't available with ${this.doctor(s.doctorId).short}. ${await this.offerFor(s.doctorId, { date: day, part })}`);
       }
+      if (!picked && !s.hold && (date || part || constraint)) return this.respond(await this.offerFor(s.doctorId, { date, part, constraint }));
     }
 
-    if (picked) return this.respond(this.offerLine(s.doctorId, s.doctorSource === 'symptom'));
+    if (picked) return this.respond(await this.offerLine(s.doctorId, s.doctorSource === 'symptom', { date, part, constraint }));
     if (s.confirmed) return this.respond(`You're booked with ${this.doctor(s.confirmed.doctorId).short} for ${s.confirmed.range}. Is there anything else I can help with?`);
     if (!s.doctorId && isBookingIntent(text)) {
       s.awaiting = 'problem';
@@ -185,18 +345,22 @@ export class Orchestrator {
     return this.respond(this.offerTimes(s.doctorId));
   }
 
-  offerTimes(doctorId) {
-    const offered = this.freeSlots(doctorId).slice(0, 3);
-    this.s.offeredSlotIds = offered.map((x) => x.id);
-    const slots = offered.map((x) => x.label);
-    if (!slots.length) return 'There are no open times this week, sorry.';
-    return `Open times are ${slots.slice(0, -1).join(', ')}${slots.length > 1 ? ' or ' : ''}${slots.at(-1)}. Which works for you?`;
+  // Up to three times, nearest first. With a date, times are said once per day.
+  offerTimes(doctorId, list = this.freeSlots(doctorId), { date = null } = {}) {
+    const offered = list.slice(0, 3);
+    this.s.offeredSlots = offered.map(({ id, time, date: d, label }) => ({ id, time, date: d, label }));
+    const days = new Set(offered.map((x) => x.date));
+    this.s.focusDate = date || (days.size === 1 ? [...days][0] : null);
+    if (!offered.length) return `${this.doctor(doctorId).short} has no open times in the next two weeks. You can pick a later date on the calendar.`;
+    const join = (xs) => `${xs.slice(0, -1).join(', ')}${xs.length > 1 ? ' or ' : ''}${xs.at(-1)}`;
+    if (date) return `${this.onDay(date, true)}, the open times are ${join(offered.map((x) => formatTime(x.time)))}. Which works for you?`;
+    return `The nearest open times are ${join(offered.map((x) => x.label))}. Which works for you?`;
   }
 
-  offerLine(doctorId, fromSymptom) {
+  async offerLine(doctorId, fromSymptom, want = {}) {
     const d = this.doctor(doctorId);
     const intro = fromSymptom ? `Thanks for explaining. I'd recommend ${d.name}, our ${d.title} doctor.` : `${d.name} it is.`;
-    return `${intro} ${this.offerTimes(doctorId)}`;
+    return `${intro} ${want.date || want.part || want.constraint ? await this.offerFor(doctorId, want) : this.offerTimes(doctorId)}`;
   }
 
   // ---- Screen actions ------------------------------------------------------
@@ -204,7 +368,10 @@ export class Orchestrator {
     return this.queue(async () => {
       if (this.s.mode === 'emergency') return;
       this.setDoctor(id, 'screen');
-      this.respond(this.offerLine(id, false), { nudge: true });
+      // Silent: the screen shows the doctor's times. The line only goes into
+      // Ava's instructions, for whenever the patient speaks next.
+      this.s.reply = await this.offerLine(id, false);
+      this.changed();
     });
   }
 
@@ -213,7 +380,7 @@ export class Orchestrator {
   }
 
   setDoctor(id, source) {
-    Object.assign(this.s, { doctorId: id, doctorSource: source, proposedSlotId: null, awaiting: 'time' });
+    Object.assign(this.s, { doctorId: id, doctorSource: source, proposedSlotId: null, proposedLabel: '', awaiting: 'time' });
     this.changed();
   }
 
@@ -228,13 +395,17 @@ export class Orchestrator {
       s.hold = res.booking;
       s.doctorId = res.booking.doctorId;
       s.proposedSlotId = null;
+      s.proposedLabel = '';
+      s.rescheduleOffer = false;
+      s.timePref = null;
+      s.focusDate = res.booking.date;
       s.awaiting = this.missingField() || 'confirm';
       this.applyState(res.state);
       const d = this.doctor(res.booking.doctorId);
       const held = source === 'assistant' ? '' : `Great, I'm holding ${d.short} for you, ${res.booking.range}. `;
       const next = s.awaiting === 'confirm'
         ? this.detailsWrapUp()
-        : `To finish the booking I just need a few details. ${ASK[s.awaiting]}`;
+        : FIELDS.some((f) => s.patient[f]) ? ASK[s.awaiting] : `To finish the booking I just need a few details. ${ASK[s.awaiting]}`;
       this.respond(`${held}${next}`, { nudge });
     } catch (err) {
       s.hold = null;
@@ -256,7 +427,6 @@ export class Orchestrator {
     s.hold = null;
     s.awaiting = 'done';
     this.applyState(res.state);
-    this.hooks.playClip('confirmed');
     const d = this.doctor(res.booking.doctorId);
     this.respond(`You're all set with ${d.short}, ${res.booking.range}. Your booking ID is ${res.booking.id}, and I've texted you a receipt.`, { nudge: true, kind: 'paid' });
   }
@@ -285,7 +455,6 @@ export class Orchestrator {
     s.alert = { source, phrase, at: Date.now() };
     s.awaiting = FIELDS.find((f) => !s.patient[f]) || null;
     this.changed(); // character turns red immediately
-    this.hooks.playClip('emergency');
 
     if (s.hold) { await api.release(s.hold.id).catch(() => {}); s.hold = null; }
     const conversationId = await this.hooks.conversationId?.();
@@ -298,7 +467,7 @@ export class Orchestrator {
     const d = this.doctor(res.booking.doctorId);
     const ask = s.awaiting ? ASK[s.awaiting] : '';
     this.respond(
-      `This sounds like an emergency. If you're in danger right now, call emergency services, 911. I've reserved ${d.short}'s next same-day slot, ${res.booking.range}, for you. ${ask}`.trim(),
+      `This sounds like an emergency. If you're in danger right now, call emergency services, 911. I've reserved ${d.short}'s earliest open slot, ${res.booking.range}, for you. ${ask}`.trim(),
       { nudge: source !== 'model', kind: 'emergency' }
     );
   }
@@ -428,6 +597,11 @@ export class Orchestrator {
           return this.respond(`Actually, the address you gave is all I need. ${next}`, { nudge: true });
         }
       }
+      // Ava named a time for the hold/booking: it must match the screen.
+      if (s.mode !== 'emergency' && !s.confirmed && s.doctorId) {
+        const confirmish = s.hold && /\b(?:confirmed|booked|booking is|appointment is|appointment for|set for|all set)\b/i.test(text);
+        if ((isHoldAnnouncement(text) || confirmish) && await this.checkAnnouncedHold(text)) return;
+      }
       if (s.mode === 'emergency' || this.collectingDetails()) {
         // Track which detail the model just asked for, so a bare reply is understood.
         const t = text.toLowerCase();
@@ -441,16 +615,22 @@ export class Orchestrator {
       const doc = detectDoctor(text);
       if (doc && !s.doctorId) this.setDoctor(doc, 'assistant');
       if (s.doctorId && !s.hold) {
-        const times = parseTimes(text);
-        const slot = times.length === 1 ? matchSlot(times, this.freeSlots(s.doctorId)) : null;
+        // Track the day Ava is talking about, so "3:30 then" means that day.
+        const focus = dayFocus(text, this.now());
+        if (focus === 'multi') s.focusDate = null;
+        else if (focus) s.focusDate = focus;
+        const times = parseTimes(text, this.now()).map((x) => (focus === 'multi' ? { ...x, date: null } : x));
+        const date = focus && focus !== 'multi' ? focus : null;
+        const pool = await this.slotPool(s.doctorId, date);
+        const slot = times.length === 1 ? matchSlot(times, pool) : null;
         // Ava said she's holding a specific time: make the screen match.
         if (slot && isHoldAnnouncement(text)) {
           const askedDetail = /\b(?:name|address|phone)\b/i.test(text);
           return this.placeHold(slot.id, 'assistant', { nudge: !askedDetail });
         }
-        if (slot) { s.proposedSlotId = slot.id; this.changed(); }
-        const listed = times.map((x) => matchSlot([x], this.freeSlots(s.doctorId))).filter(Boolean);
-        if (listed.length > 1) s.offeredSlotIds = listed.map((x) => x.id);
+        if (slot) { s.proposedSlotId = slot.id; s.proposedLabel = slot.label; this.changed(); }
+        const listed = times.map((x) => matchSlot([x], pool)).filter(Boolean);
+        if (listed.length > 1) s.offeredSlots = listed.map(({ id, time, date: d, label }) => ({ id, time, date: d, label }));
       }
     });
   }
@@ -459,19 +639,33 @@ export class Orchestrator {
   buildInstructions() {
     const s = this.s;
     const docs = (this.snapshot?.doctors || []).map((d) => {
-      const slots = d.freeSlots.slice(0, 4).map((x) => x.label).join(', ') || 'none';
-      return `- ${d.name} (${d.title}). Open: ${slots}.`;
+      const slots = d.freeSlots.slice(0, 4).map((x) => x.label).join(', ') || 'none in the next two weeks';
+      return `- ${d.name} (${d.title}). Nearest open: ${slots}.`;
     }).join('\n');
+    const nowText = new Date(this.now()).toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+    // The selected doctor's open times for the next two weeks, grouped by day.
+    const sel = s.doctorId && this.doctor(s.doctorId);
+    const byDay = [];
+    for (const x of sel?.freeSlots || []) {
+      const last = byDay.at(-1);
+      if (last?.date === x.date) last.times.push(formatTime(x.time));
+      else byDay.push({ date: x.date, times: [formatTime(x.time)] });
+    }
+    const dayName = (date) => new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
 
     const lines = [
       'You are Ava, the friendly voice booking assistant for Maple Clinic. Speak naturally, warmly and briefly: 1-2 short sentences per turn. Never use lists or markdown.',
-      'RULE: Always have the patient describe their problem first, then book. Recommend the doctor whose specialty fits, offer up to three of their open times, and let the patient pick.',
+      `CURRENT DATE AND TIME: ${nowText} (clinic local time). Use this for everything about dates: "today", "tomorrow" and weekday names are relative to it.`,
+      `CLINIC HOURS: ${this.snapshot?.clinicHours || 'Monday to Friday, 9 AM to 12 PM and 2 PM to 4 PM'}. Appointments are 30 minutes.`,
+      'RULE: Always have the patient describe their problem first, then book. Recommend the doctor whose specialty fits, offer up to three of their NEAREST open times from now (never list more than three times in one turn) (the lists below are sorted soonest first), and let the patient pick. Never offer a time in the past, on a weekend, or one that is not listed. The OPEN TIMES list is the only truth about availability: a weekday is open if it appears there. Never say a doctor or the clinic is "closed on Wednesdays" (or any weekday); if a specific date is missing from the list, say that date has no open times. Never say you are holding or booking a time unless the NEXT LINE says so. If the patient asks for a particular day, the morning/afternoon, or "after/before" a time, only offer open times that match; if none match, say so and offer the nearest alternatives. When the patient gives only a time ("3:30 then"), it means the day you were just discussing. A question like "do you have anything after 3?" is NOT a choice: never hold a time until the patient picks one. If the patient wants a different day or time after you are holding one, offer alternatives; the screen moves the hold when they pick, and their details are kept. Say days relative to today ("tomorrow", "on Monday") and add the date when it is more than a week away.',
       'When the patient picks a time, say you are holding it for them and give the appointment as a 30-minute range (for example "11:00 AM to 11:30 AM today"); never mention how long the hold lasts. Then collect their full name, home address and phone number, one question at a time. Accept the address exactly as the patient says it: never ask for a city, province, postal code or unit. After all three are collected, do a final check: read them back in this form: "Just a final check: your name is ..., your address is ..., and your phone number is ... Is that all correct?" (phone as digits). If the patient corrects something, update it and read all three back again. Only when the patient says yes, tell them the payment screen is open and to tap Done to confirm (or Release hold for a different time); then stay quiet until the screen reports what they tapped. Never invent booking IDs, prices or times that are not listed below; the screen shows IDs.',
       'ADDRESS RULE: whatever the patient says for their address the first time is final, even if it is only a number, only a street, misheard or unusual. NEVER ask any follow-up about the address: no street name, house number, city, province, state, postal code, ZIP, unit, spelling or "full address". Never ask them to repeat or complete it. Acknowledge briefly and go straight to the phone number.',
-      'EMERGENCIES: if the patient mentions chest pain, trouble breathing, stroke signs, heavy bleeding, fainting, a severe allergic reaction, suicidal thoughts, a baby with a fever, a head injury, poisoning, sudden confusion, severe abdominal pain, choking, a bone sticking out or a limb bent the wrong way, a bad burn, bleeding during pregnancy, or feeling like they are dying, or says it is urgent (but not "not urgent" or "urgent care"), say clearly: "This sounds like an emergency. If you are in danger, call emergency services, 911." Then tell them a same-day emergency slot has been reserved and collect their full name, home address and phone number, one at a time (never ask for city or postal code). Stay calm and reassuring.',
+      'EMERGENCIES: if the patient mentions chest pain, trouble breathing, stroke signs, heavy bleeding, fainting, a severe allergic reaction, suicidal thoughts, a baby with a fever, a head injury, poisoning, sudden confusion, severe abdominal pain, choking, a bone sticking out or a limb bent the wrong way, a bad burn, bleeding during pregnancy, or feeling like they are dying, or says it is urgent (but not "not urgent" or "urgent care"), say clearly: "This sounds like an emergency. If you are in danger, call emergency services, 911." Then tell them the earliest emergency slot has been reserved and collect their full name, home address and phone number, one at a time (never ask for city or postal code). Stay calm and reassuring.',
       '',
       'DOCTORS:',
       docs,
+      ...(sel ? ['', `OPEN TIMES FOR ${sel.name.toUpperCase()} (next two weeks):`, ...byDay.map((x) => `- ${dayName(x.date)}: ${x.times.join(', ')}`)] : []),
       '',
       'CURRENT STATE (from the clinic screen, always trust this):',
     ];
@@ -501,7 +695,7 @@ export class Orchestrator {
       lines.push('', 'EARLIER IN THIS CONVERSATION (before a page refresh, continue from here):');
       for (const m of this.resumeTranscript) lines.push(`${m.role === 'user' ? 'Patient' : 'Ava'}: ${m.text}`);
     }
-    if (s.reply) lines.push('', `SUGGESTED NEXT LINE (adapt naturally): "${s.reply}"`);
+    if (s.reply) lines.push('', `NEXT LINE: say this now. Keep every doctor, day, date and time exactly as written; you may only smooth the wording: "${s.reply}"`);
     return lines.join('\n');
   }
 

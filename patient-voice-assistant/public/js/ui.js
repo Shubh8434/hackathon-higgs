@@ -17,12 +17,16 @@ function formatTime(time) {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 
-// 30-minute appointment: "11:00 AM to 11:30 AM".
-function formatRange(time) {
-  const [h, m] = time.split(':').map(Number);
+// "Thursday, October 29, 3:30 PM to 4:00 PM"
+function fullRange(b) {
+  if (!b?.date || !b.time) return b?.range || b?.label || '';
+  const [h, m] = b.time.split(':').map(Number);
   const end = h * 60 + m + 30;
-  return `${formatTime(time)} to ${formatTime(`${Math.floor(end / 60)}:${end % 60}`)}`;
+  const day = new Date(`${b.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  return `${day}, ${formatTime(b.time)} to ${formatTime(`${Math.floor(end / 60)}:${end % 60}`)}`;
 }
+
+const shortDate = (b) => (b?.date ? new Date(`${b.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : '');
 
 // ---------------------------------------------------------------------------
 // Captions with keyword highlighting
@@ -90,10 +94,13 @@ export function renderCards(s, doctor, holdRemainingMs) {
 
   let time = '';
   let timeSub = '';
-  if (booking) { time = booking.range || booking.label; timeSub = booking.emergency ? 'Same-day emergency slot' : s.hold ? `On hold · ${fmtCountdown(holdRemainingMs)}` : 'Confirmed'; }
-  else if (s.proposedSlotId) {
-    const [, day, t] = s.proposedSlotId.split('|');
-    time = `${formatRange(t)} ${day}`;
+  if (booking) {
+    time = booking.range || booking.label;
+    const status = booking.emergency ? 'Earliest emergency slot' : s.hold ? `On hold · ${fmtCountdown(holdRemainingMs)}` : 'Confirmed';
+    timeSub = [shortDate(booking), status].filter(Boolean).join(' · ');
+  }
+  else if (s.proposedSlotId && s.proposedLabel) {
+    time = s.proposedLabel;
     timeSub = 'Proposed — say “yes” to hold';
   }
   card('#cardTime', time, timeSub, booking?.emergency ? 'filled danger' : time ? 'filled' : '');
@@ -178,9 +185,11 @@ export function renderSchedule(snapshot, doctor) {
   body.innerHTML = '';
   let lastDay = null;
   for (const b of snapshot.bookings) {
-    if (b.day !== lastDay) {
-      body.append(el('tr', { className: 'day-row' }, el('td', { colSpan: 4, textContent: b.day === 'today' ? 'Today' : 'Tomorrow' })));
-      lastDay = b.day;
+    if ((b.date || b.day) !== lastDay) {
+      const word = b.dayLabel || b.day || '';
+      const nice = b.date ? new Date(`${b.date}T12:00:00`).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) : word;
+      body.append(el('tr', { className: 'day-row' }, el('td', { colSpan: 4, textContent: /^(today|tomorrow)$/.test(word) ? `${word[0].toUpperCase()}${word.slice(1)} · ${nice}` : nice })));
+      lastDay = b.date || b.day;
     }
     let tag = b.status === 'held' ? 'HELD' : 'CONFIRMED';
     let cls = b.status === 'held' ? 'tag-held' : 'tag-ok';
@@ -309,11 +318,68 @@ export function renderPayment(s, doctor, holdRemainingMs) {
   if (!open) return;
   const d = doctor(s.hold.doctorId);
   $('#payDoctor').textContent = d ? `${d.name} · ${d.title}` : '';
-  $('#payTime').textContent = s.hold.range;
+  $('#payTime').textContent = fullRange(s.hold);
   $('#payHoldId').textContent = s.hold.id;
   $('#payName').textContent = s.patient.name || '—';
   $('#payAddress').textContent = s.patient.address || '—';
   $('#payPhone').textContent = s.patient.phone || '—';
   $('#payCountdown').textContent = fmtCountdown(holdRemainingMs);
   $('#payCountdown').classList.toggle('low', holdRemainingMs < 60_000);
+}
+
+// ---------------------------------------------------------------------------
+// Availability calendar (month grid + time slots for the chosen day)
+// ---------------------------------------------------------------------------
+const CAL_TITLE = {
+  open: 'Open times available', full: 'Fully booked / unavailable', off: 'Doctor not working',
+  closed: 'Clinic closed (weekend)', past: 'In the past', beyond: 'Not bookable yet (more than 90 days ahead)',
+};
+const SLOT_TITLE = { open: 'Open: click to book', booked: 'Booked', held: 'On hold', unavailable: 'Unavailable', past: 'Time has passed' };
+
+export function renderCalendar(cal, { selectedDate, disabled, onDay, onSlot }) {
+  const grid = $('#calGrid');
+  grid.innerHTML = '';
+  for (const w of ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']) grid.append(el('div', { className: 'cal-wd', textContent: w }));
+  if (!cal) { $('#calDay').innerHTML = '<div class="muted small">Loading…</div>'; return; }
+
+  const [y, m] = cal.month.split('-').map(Number);
+  $('#calMonth').textContent = new Date(y, m - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
+  const lead = (new Date(y, m - 1, 1).getDay() + 6) % 7;
+  for (let i = 0; i < lead; i++) grid.append(el('div', { className: 'cal-blank' }));
+
+  for (const d of cal.days) {
+    const few = d.status === 'open' && d.open <= 3;
+    const cell = el('button', {
+      type: 'button',
+      className: `cal-cell st-${d.status}${few ? ' few' : ''}${d.date === cal.today ? ' today' : ''}${d.date === selectedDate ? ' selected' : ''}`,
+      title: `${CAL_TITLE[d.status] || ''}${d.status === 'open' ? ` (${d.open} open)` : ''}`,
+      disabled: !['open', 'full'].includes(d.status),
+      onclick: () => onDay(d.date),
+    });
+    cell.append(el('span', { className: 'cal-num', textContent: String(Number(d.date.slice(8))) }));
+    if (d.status === 'open') cell.append(el('span', { className: 'cal-count', textContent: `${d.open}` }));
+    grid.append(cell);
+  }
+
+  const box = $('#calDay');
+  box.innerHTML = '';
+  const day = cal.days.find((d) => d.date === selectedDate);
+  if (!day) {
+    box.append(el('div', { className: 'muted small', textContent: 'Pick a day to see its times.' }));
+    return;
+  }
+  const nice = new Date(`${day.date}T12:00:00`).toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+  box.append(el('div', { className: 'cal-day-head', textContent: `${nice} · ${day.open} open` }));
+  const list = el('div', { className: 'cal-slots' });
+  for (const x of day.slots) {
+    list.append(el('button', {
+      type: 'button',
+      className: `cal-slot ss-${x.status}`,
+      textContent: x.label,
+      title: SLOT_TITLE[x.status] || x.status,
+      disabled: x.status !== 'open' || disabled,
+      onclick: () => onSlot(x.id),
+    }));
+  }
+  box.append(list);
 }

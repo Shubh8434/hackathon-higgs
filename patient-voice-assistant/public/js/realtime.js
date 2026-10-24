@@ -34,6 +34,7 @@ export class RealtimeSession {
     this.instructions = '';
     this.voice = 'default';
     this.responseActive = false;
+    this.requestedAt = 0; // a response.create is in flight (until response.created)
     this.assistantText = '';
   }
 
@@ -104,6 +105,11 @@ export class RealtimeSession {
             prefix_padding_ms: 300,
             silence_duration_ms: 500,
             min_speech_duration: 0.125,
+            // The app decides when Ava speaks: it reads the patient's words,
+            // updates the clinic state and instructions, then calls reply().
+            // Otherwise Higgs starts answering before the transcript arrives.
+            create_response: false,
+            interrupt_response: true,
           },
         },
         output: {
@@ -138,11 +144,20 @@ export class RealtimeSession {
     }
   }
 
+  // Answer the patient's last turn (instructions must already be up to date).
+  reply() {
+    if (!this.connected || this.responseActive || Date.now() - this.requestedAt < 4000) return false;
+    this.requestedAt = Date.now();
+    this.send({ type: 'response.create' });
+    return true;
+  }
+
   // Make the model speak now (after on-screen actions / safety-net alerts).
   // Higgs rejects a bare response.create when the assistant spoke last
   // ("No user input"), so the event goes in as a short text user item first.
   prompt(note) {
-    if (!this.connected || this.responseActive) return false;
+    if (!this.connected || this.responseActive || Date.now() - this.requestedAt < 4000) return false;
+    this.requestedAt = Date.now();
     this.send({
       type: 'conversation.item.create',
       item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: note }] },
@@ -183,6 +198,7 @@ export class RealtimeSession {
         break;
 
       case 'response.created':
+        this.requestedAt = 0;
         this.responseActive = true;
         this.assistantText = '';
         this.emit('onResponseStart');
@@ -207,6 +223,7 @@ export class RealtimeSession {
         break;
 
       case 'error':
+        this.requestedAt = 0;
         this.emit('onError', `${msg.error?.type || 'error'}: ${msg.error?.message || 'Realtime error'}`, msg.error);
         break;
     }

@@ -17,6 +17,7 @@
       </div>
     </div>
     <div class="top-right">
+      <span class="pill-status clock" id="clock" title="Current date and time (Ava uses this for booking)">—</span>
       <span class="pill-status" id="modePill">OFFLINE</span>
       <span class="pill-status mono" title="Session time and estimated cost (~$0.05–$0.10 per 5-min call)">
         ⏱ <span id="sessionTimer">0:00</span> · <span id="sessionCost">est. $0.000</span>
@@ -30,7 +31,7 @@
   </header>
 
   <main class="layout">
-    <!-- ================= LEFT: character, cards, avatar ================= -->
+    <!-- ================= LEFT: character, cards, clinic dashboard ================= -->
     <section class="col col-left">
       <div class="panel character-panel">
         <div id="character" data-state="idle">
@@ -64,26 +65,15 @@
         <div class="info-card" id="cardPayment"><div class="label">Payment</div><div class="value">—</div><div class="sub"></div></div>
       </div>
 
-      <div class="panel avatar-panel">
-        <div class="panel-head"><h3>Avatar <small>Higgs Avatar · pre-rendered</small></h3></div>
-        <div class="avatar-stage">
-          <video id="avatarVideo" class="hidden" playsinline></video>
-          <div id="avatarPlaceholder" class="avatar-placeholder">No clip playing</div>
-          <div id="avatarCaption" class="avatar-caption hidden"></div>
+      <div class="panel">
+        <div class="panel-head"><h3>Clinic dashboard <small>live schedule</small></h3></div>
+        <div class="schedule-wrap">
+          <table class="schedule">
+            <thead><tr><th>Time</th><th>Doctor</th><th>Patient</th><th>Status</th></tr></thead>
+            <tbody id="scheduleBody"></tbody>
+          </table>
         </div>
-        <details class="clip-admin">
-          <summary>Avatar clips (welcome · emergency · confirmed)</summary>
-          <ul id="clipStatus" class="clip-status"></ul>
-          <label class="small">Face image (PNG/JPEG/WEBP, max 10 MB)
-            <input type="file" id="clipFile" accept="image/png,image/jpeg,image/webp" />
-          </label>
-          <img id="clipPreview" class="clip-preview hidden" alt="face preview" />
-          <div class="row-btns">
-            <button class="primary small" id="clipRender" disabled>Render missing clips</button>
-            <button class="ghost small" id="clipRerender">Re-render all</button>
-          </div>
-          <div class="muted small" id="clipNote">Rendered once, cached in <code>clips/</code>, replayed at key moments.</div>
-        </details>
+        <ul class="event-log" id="eventLog"></ul>
       </div>
     </section>
 
@@ -174,7 +164,7 @@
       </div>
     </section>
 
-    <!-- ================= RIGHT: phone, doctors, dashboard ================= -->
+    <!-- ================= RIGHT: phone, doctors, calendar ================= -->
     <section class="col col-right">
       <div class="phone" id="phone">
         <div class="phone-notch"></div>
@@ -191,20 +181,27 @@
       <div class="panel">
         <div class="panel-head"><h3>Doctors</h3></div>
         <div class="doctor-list" id="doctorList"></div>
+        <details class="cal" id="calPanel">
+          <summary>📅 Availability calendar</summary>
+          <div class="cal-head">
+            <select id="calDoctor" title="Doctor"></select>
+            <div class="cal-nav">
+              <button type="button" class="ghost small" id="calPrev" title="Previous month">‹</button>
+              <span id="calMonth">—</span>
+              <button type="button" class="ghost small" id="calNext" title="Next month">›</button>
+            </div>
+          </div>
+          <div class="cal-grid" id="calGrid"></div>
+          <div class="cal-legend">
+            <span><i class="lg st-open"></i>open</span><span><i class="lg few"></i>few left</span>
+            <span><i class="lg st-full"></i>full</span><span><i class="lg st-off"></i>doctor off</span><span><i class="lg st-closed"></i>closed</span>
+          </div>
+          <div class="cal-day" id="calDay"></div>
+        </details>
         <h4 id="slotHeading">Open times</h4>
         <div class="slot-list" id="slotList"></div>
       </div>
 
-      <div class="panel">
-        <div class="panel-head"><h3>Clinic dashboard <small>live schedule</small></h3></div>
-        <div class="schedule-wrap">
-          <table class="schedule">
-            <thead><tr><th>Time</th><th>Doctor</th><th>Patient</th><th>Status</th></tr></thead>
-            <tbody id="scheduleBody"></tbody>
-          </table>
-        </div>
-        <ul class="event-log" id="eventLog"></ul>
-      </div>
     </section>
   </main>
 

@@ -1,23 +1,21 @@
 // App wiring: Realtime session ⇄ orchestrator ⇄ UI, demo-mode fallbacks,
-// avatar clips, polling, timers.
+// polling, timers.
 
 import { api } from './api.js';
 import { decodeToPcm16 } from './audio.js';
 import { detectModelEmergency } from './keywords.js';
 import { RealtimeSession } from './realtime.js';
 import { AssistantVoice } from './speech.js';
-import { AvatarClips } from './avatar.js';
 import { Orchestrator } from './orchestrator.js';
 import {
   $, $$, addBubble, updateBubble, clearCaptions, renderCharacter, renderCards, renderDoctors,
-  renderSchedule, renderPhone, renderEmergency, renderDetails, renderPayment, resetRenderMemory,
+  renderSchedule, renderPhone, renderEmergency, renderDetails, renderPayment, resetRenderMemory, renderCalendar,
 } from './ui.js';
 
 const PATIENT_VOICE = 'marcus'; // voice used to "speak" demo phrases into the session
 const WELCOME = "Hi, I'm Ava, your booking assistant. How can I help today?";
 
 const voice = new AssistantVoice();
-const avatar = new AvatarClips();
 let clockOffset = 0; // server now - client now
 
 // ---------------------------------------------------------------------------
@@ -29,24 +27,15 @@ const orch = new Orchestrator({
   say: async (text) => {
     addBubble('assistant', text, { badge: 'offline voice' });
     logMessage('assistant', text, 'offline voice');
-    await waitFor(() => !avatar.playing, 6000); // let a clip finish first
     voice.say(text);
   },
-  // Clips play with sound offline; muted (caption only) when the live model is
-  // about to talk, so two voices never overlap.
-  playClip: (key) => avatar.play(key, { muted: rt.connected }),
   nudge: (kind) => nudge(kind),
+  // The server's clock, so "today" and "past" match the clinic calendar.
+  now: () => Date.now() + clockOffset,
   // Links each booking record to this chat (created now if it doesn't exist yet).
   conversationId: () => ensureConversation().catch(() => null),
 });
 
-function waitFor(cond, timeout) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const tick = () => (cond() || Date.now() - start > timeout ? resolve() : setTimeout(tick, 100));
-    tick();
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Realtime session
@@ -58,6 +47,23 @@ let suppressUntil = 0; // drop the transcript of an injected demo phrase
 let pendingNudge = null; // { kind, reason: 'busy' | 'user-turn' }
 let userSpeaking = false;
 let paymentPause = false; // payment screen open: no patient input until Done / Release
+let pendingReply = false; // a patient turn is waiting for Ava's answer
+let replyFallback = null;
+
+// Ava answers a patient turn only after the orchestrator has processed it and
+// her instructions carry the fresh state (see create_response: false).
+function requestReply() {
+  clearTimeout(replyFallback);
+  if (!rt.connected || paymentPause) return;
+  syncInstructionsNow();
+  if (rt.reply()) pendingReply = false;
+  else pendingReply = true; // retried when the current response finishes
+}
+
+// Reply once the orchestrator has finished every queued turn.
+function replyAfterTurn() {
+  orch.busy.then(requestReply, requestReply);
+}
 
 function dropUserBubble() {
   if (userBubble) { userBubble.remove(); userBubble = null; }
@@ -66,13 +72,17 @@ function dropUserBubble() {
 
 const rt = new RealtimeSession({
   onStatus: (s) => setRtStatus(s),
-  onSpeechStopped: () => { userSpeaking = false; },
+  onSpeechStopped: () => {
+    userSpeaking = false;
+    // If no transcript arrives (STT hiccup), still answer what was heard.
+    clearTimeout(replyFallback);
+    if (userText.trim()) replyFallback = setTimeout(() => { if (!rt.responseActive) requestReply(); }, 5000);
+  },
   onSpeechStarted: () => {
     if (paymentPause) return;
     // Barge-in: silence everything the assistant side is playing.
     userSpeaking = true;
     voice.stop();
-    avatar.stop();
     if (Date.now() < suppressUntil) return;
     userText = '';
     if (!userBubble) userBubble = addBubble('user', '', { pending: true });
@@ -86,10 +96,13 @@ const rt = new RealtimeSession({
   },
   onUserFinal: (text) => {
     if (Date.now() < suppressUntil) {
+      // Injected demo phrase: it was already handled as text; now answer it.
       suppressUntil = 0;
       if (userBubble) { userBubble.remove(); userBubble = null; }
+      replyAfterTurn();
       return;
     }
+    clearTimeout(replyFallback);
     if (paymentPause) { dropUserBubble(); return; }
     if (userBubble) updateBubble(userBubble, text, { pending: false });
     else addBubble('user', text);
@@ -97,6 +110,7 @@ const rt = new RealtimeSession({
     userBubble = null;
     userText = '';
     orch.handleUser(text, { final: true });
+    replyAfterTurn();
   },
   onResponseStart: () => {
     assistantBubble = null;
@@ -110,6 +124,12 @@ const rt = new RealtimeSession({
     assistantBubble = null;
     logMessage('assistant', text);
     orch.handleAssistant(text);
+    if (pendingReply) {
+      pendingReply = false;
+      pendingNudge = null;
+      setTimeout(replyAfterTurn, 200);
+      return;
+    }
     if (pendingNudge) {
       const { kind, reason } = pendingNudge;
       pendingNudge = null;
@@ -173,8 +193,7 @@ async function connect() {
     // Resuming a saved conversation: pick up where it left off, no greeting.
     if (messages.length) {
       nudge('resume');
-    } else if (!avatar.play('welcome')) {
-      // Greeting: the pre-rendered welcome clip if we have one, else the model says it.
+    } else {
       orch.s.reply = WELCOME;
       nudge('welcome');
     }
@@ -205,7 +224,6 @@ async function sendPatientText(text, badge = 'demo') {
   $('#replayBtn').disabled = false;
   $('#replayBtn').title = `Replay: “${text}”`;
   voice.stop();
-  avatar.stop();
   rt.stopPlayback();
   addBubble('user', text, { badge });
   logMessage('user', text, badge);
@@ -224,6 +242,7 @@ async function sendPatientText(text, badge = 'demo') {
     // Couldn't voice it: hand the model the patient's words as text instead.
     suppressUntil = 0;
     showError(`Demo audio injection failed (${err.message}); sent the phrase as text instead.`);
+    await orch.busy;
     syncInstructionsNow();
     if (!rt.prompt(text)) pendingNudge = { kind: 'demo', reason: 'busy' };
   }
@@ -348,6 +367,66 @@ function render() {
   renderPayment(s, doctorById, holdRemaining());
   setPaymentPause(Boolean(s.hold) && s.mode !== 'emergency' && s.awaiting === 'payment');
   if (s.error) showError(s.error);
+  syncCalendar(snap, s);
+}
+
+// ---------------------------------------------------------------------------
+// Availability calendar: follows the selected doctor unless the user picks
+// one in its dropdown; reloads when bookings change.
+// ---------------------------------------------------------------------------
+const cal = { doctorId: null, month: null, date: null, data: null, manual: false, sig: '', loading: 0 };
+const monthOf = (iso) => iso.slice(0, 7);
+const shiftMonth = (month, n) => { const [y, m] = month.split('-').map(Number); const d = new Date(y, m - 1 + n, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+
+function syncCalendar(snap, s) {
+  const sel = $('#calDoctor');
+  if (!sel.options.length) for (const d of snap.doctors) sel.append(new Option(`${d.name} · ${d.title}`, d.id));
+  const want = (!cal.manual && s.doctorId) || cal.doctorId || 'patel';
+  const sig = JSON.stringify(snap.bookings.map((b) => [b.id, b.slotId, b.status]));
+  if (want !== cal.doctorId) { cal.doctorId = want; cal.date = null; loadCalendar(); }
+  else if (sig !== cal.sig) { cal.sig = sig; loadCalendar(); }
+  else drawCalendar();
+}
+
+async function loadCalendar() {
+  const snap = orch.snapshot;
+  if (!snap || !cal.doctorId) return;
+  cal.month ||= monthOf(snap.today);
+  $('#calDoctor').value = cal.doctorId;
+  const ticket = ++cal.loading;
+  try {
+    const data = await api.availability(cal.doctorId, cal.month);
+    if (ticket !== cal.loading) return; // a newer request superseded this one
+    cal.data = data;
+    if (!cal.date || !data.days.some((d) => d.date === cal.date && ['open', 'full'].includes(d.status))) {
+      cal.date = data.days.find((d) => d.status === 'open')?.date || null;
+    }
+  } catch (err) {
+    cal.data = null;
+    $('#calDay').textContent = err.status === 404
+      ? 'Calendar unavailable: the server is running an older version. Restart it (npm start) and reload.'
+      : `Calendar failed to load: ${err.message}`;
+    return;
+  }
+  drawCalendar();
+}
+
+function drawCalendar() {
+  const s = orch.s;
+  renderCalendar(cal.data, {
+    selectedDate: cal.date,
+    disabled: s.mode === 'emergency' || Boolean(s.confirmed) || paymentPause,
+    onDay: (date) => { cal.date = date; drawCalendar(); },
+    onSlot: (id) => orch.selectSlot(id),
+  });
+  const today = orch.snapshot && monthOf(orch.snapshot.today);
+  $('#calPrev').disabled = !cal.data || cal.month <= today;
+  $('#calNext').disabled = !cal.data || cal.month >= monthOf(cal.data.horizon);
+}
+
+function updateClock() {
+  $('#clock').textContent = new Date(Date.now() + clockOffset)
+    .toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
 // While the payment screen is up the conversation waits: mic, demo phrases and
@@ -366,7 +445,7 @@ function setPaymentPause(on) {
 function characterLoop() {
   let state = 'idle';
   if (orch.s.mode === 'emergency') state = 'alert';
-  else if (rt.speaking || voice.speaking || avatar.playing) state = 'speaking';
+  else if (rt.speaking || voice.speaking) state = 'speaking';
   else if (rt.connected && !paymentPause) state = 'listening';
   renderCharacter(state);
 
@@ -466,12 +545,12 @@ function bind() {
   }
   $('#resetBtn').addEventListener('click', async () => {
     voice.stop();
-    avatar.stop();
     resetRenderMemory();
     clearCaptions();
     hideError();
     pendingNudge = null;
     startNewConversation();
+    cal.manual = false;
     await orch.reset();
     syncInstructionsNow();
   });
@@ -482,6 +561,9 @@ function bind() {
     modal.querySelector('video')?.pause();
   }));
   $('#errorClose').addEventListener('click', hideError);
+  $('#calDoctor').addEventListener('change', (e) => { cal.manual = true; cal.doctorId = e.target.value; cal.date = null; loadCalendar(); });
+  $('#calPrev').addEventListener('click', () => { cal.month = shiftMonth(cal.month, -1); cal.date = null; loadCalendar(); });
+  $('#calNext').addEventListener('click', () => { cal.month = shiftMonth(cal.month, 1); cal.date = null; loadCalendar(); });
   $('#convSelect').addEventListener('change', (e) => {
     if (!e.target.value) return;
     location.href = `${location.pathname}?c=${encodeURIComponent(e.target.value)}`;
@@ -510,9 +592,12 @@ async function boot() {
   }
   refreshHistory();
   await poll();
-  avatar.refresh();
   setInterval(poll, 3000);
   setInterval(characterLoop, 100);
+  updateClock();
+  setInterval(updateClock, 1000);
+  // Keep Ava's "current date and time" fresh during a long session.
+  setInterval(scheduleInstructionSync, 30_000);
 }
 
 boot();

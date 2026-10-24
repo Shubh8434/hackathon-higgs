@@ -1,8 +1,15 @@
-// In-memory mock clinic: 5 doctors, a fixed two-day schedule, holds, bookings
-// and an SMS log. Deterministic on purpose so the demo plays out the same way
-// every time — call reset() to reseed.
+// In-memory mock clinic on a real calendar: 5 doctors, Mon–Fri 9–12 and 2–4 in
+// 30-minute slots, 90 days ahead of "now". Each doctor's days off and blocked
+// times come from a hash of (doctor, date, time), so availability is random-
+// looking but fixed — the same every run, like a hardcoded schedule. Holds,
+// bookings and the SMS log live in memory; reset() reseeds demo bookings into
+// each doctor's first open slots so an emergency always has one to pre-empt.
 
 export const HOLD_MS = 5 * 60 * 1000;
+export const SLOT_MINUTES = 30;
+export const HORIZON_DAYS = 90; // how far ahead the calendar goes
+export const SNAPSHOT_DAYS = 14; // open slots sent with every state poll
+export const CLINIC_HOURS = 'Monday to Friday, 9:00 AM to 12:00 PM and 2:00 PM to 4:00 PM (closed weekends)';
 
 export const DOCTORS = [
   { id: 'patel', name: 'Dr. Sarah Patel', short: 'Dr. Patel', specialty: 'general', title: 'General Practice' },
@@ -12,48 +19,108 @@ export const DOCTORS = [
   { id: 'rahman', name: 'Dr. Aisha Rahman', short: 'Dr. Rahman', specialty: 'pediatrics', title: 'Pediatrics' },
 ];
 
-export const DAYS = ['today', 'tomorrow'];
 export const TIMES = ['09:00', '09:30', '10:00', '10:30', '11:00', '11:30', '14:00', '14:30', '15:00', '15:30'];
 
-// Existing normal bookings so an emergency has something to pre-empt.
-const SEED = [
-  { doctorId: 'patel', time: '09:00', name: 'Emily Carter', reason: 'Routine checkup' },
-  { doctorId: 'patel', time: '09:30', name: 'Tom Nguyen', reason: 'Flu symptoms' },
-  { doctorId: 'chen', time: '09:00', name: 'Robert Hall', reason: 'Blood pressure follow-up' },
-  { doctorId: 'chen', time: '09:30', name: 'Linda Park', reason: 'ECG review' },
-  { doctorId: 'chen', time: '10:30', name: 'Omar Haddad', reason: 'Palpitations follow-up' },
-  { doctorId: 'lopez', time: '09:00', name: 'Grace Liu', reason: 'Skin check' },
-  { doctorId: 'kim', time: '09:00', name: 'Marcus Brown', reason: 'Knee pain' },
-  { doctorId: 'kim', time: '10:00', name: 'Sofia Rossi', reason: 'Back pain' },
-  { doctorId: 'rahman', time: '09:30', name: 'Noah Smith', reason: 'Vaccination' },
-];
+// Demo bookings, placed at each doctor's Nth open slot (from now) on reset.
+const SEED = {
+  patel: [[0, 'Emily Carter', 'Routine checkup'], [1, 'Tom Nguyen', 'Flu symptoms']],
+  chen: [[0, 'Robert Hall', 'Blood pressure follow-up'], [1, 'Linda Park', 'ECG review'], [3, 'Omar Haddad', 'Palpitations follow-up']],
+  lopez: [[0, 'Grace Liu', 'Skin check']],
+  kim: [[0, 'Marcus Brown', 'Knee pain'], [2, 'Sofia Rossi', 'Back pain']],
+  rahman: [[1, 'Noah Smith', 'Vaccination']],
+};
 
-export const slotId = (doctorId, day, time) => `${doctorId}|${day}|${time}`;
+export const slotId = (doctorId, date, time) => `${doctorId}|${date}|${time}`;
 
 export function parseSlotId(id) {
-  const [doctorId, day, time] = String(id).split('|');
-  return { doctorId, day, time };
+  const [doctorId, date, time] = String(id).split('|');
+  return { doctorId, date, time };
 }
+
+// ---------------------------------------------------------------------------
+// Dates (local time, ISO "YYYY-MM-DD") and labels
+// ---------------------------------------------------------------------------
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+const pad = (n) => String(n).padStart(2, '0');
+const toDate = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
+const toMin = (time) => { const [h, m] = time.split(':').map(Number); return h * 60 + m; };
+
+export function isoDate(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+export function addDays(iso, n) {
+  const d = toDate(iso);
+  d.setDate(d.getDate() + n);
+  return isoDate(d.getTime());
+}
+
+const daysBetween = (a, b) => Math.round((toDate(b) - toDate(a)) / 86_400_000);
 
 export function formatTime(time) {
   const [h, m] = time.split(':').map(Number);
-  const suffix = h >= 12 ? 'PM' : 'AM';
-  const h12 = h % 12 || 12;
-  return `${h12}:${String(m).padStart(2, '0')} ${suffix}`;
+  return `${h % 12 || 12}:${pad(m)} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 
-export function slotLabel(day, time) {
-  return `${formatTime(time)} ${day}`;
+export function endTime(time) {
+  const end = toMin(time) + SLOT_MINUTES;
+  return `${pad(Math.floor(end / 60))}:${pad(end % 60)}`;
 }
 
-export const SLOT_MINUTES = 30;
+// "Monday, October 26"
+export function longDay(iso) {
+  const d = toDate(iso);
+  return `${WEEKDAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+}
 
-// "11:00 AM to 11:30 AM today": how a booked appointment is shown and spoken.
-export function slotRange(day, time) {
-  const [h, m] = time.split(':').map(Number);
-  const end = h * 60 + m + SLOT_MINUTES;
-  const endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
-  return `${formatTime(time)} to ${formatTime(endTime)} ${day}`;
+// "today" | "tomorrow" | "Monday" (within a week) | "Tuesday, Nov 3"
+export function dayWord(iso, nowMs) {
+  const diff = daysBetween(isoDate(nowMs), iso);
+  if (diff === 0) return 'today';
+  if (diff === 1) return 'tomorrow';
+  const d = toDate(iso);
+  if (diff > 1 && diff < 7) return WEEKDAYS[d.getDay()];
+  return `${WEEKDAYS[d.getDay()]}, ${MONTHS[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
+}
+
+const on = (w) => (w === 'today' || w === 'tomorrow' ? w : `on ${w}`);
+
+// "9:30 AM on Monday"
+export function slotLabel(date, time, nowMs) {
+  return `${formatTime(time)} ${on(dayWord(date, nowMs))}`;
+}
+
+// "11:00 AM to 11:30 AM on Monday": how an appointment is shown and spoken.
+export function slotRange(date, time, nowMs) {
+  return `${formatTime(time)} to ${formatTime(endTime(time))} ${on(dayWord(date, nowMs))}`;
+}
+
+// "Monday, October 26, 11:00 AM to 11:30 AM": absolute, for SMS and records.
+export function fullRange(date, time) {
+  return `${longDay(date)}, ${formatTime(time)} to ${formatTime(endTime(time))}`;
+}
+
+// ---------------------------------------------------------------------------
+// Fixed "random" schedule: weekends closed, ~12% doctor days off, ~30% of the
+// remaining slots blocked (meetings, surgery, admin). Pure function of inputs.
+// ---------------------------------------------------------------------------
+function hash01(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  // Final avalanche so neighbouring dates don't get similar values.
+  h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+export function scheduleStatus(doctorId, date, time = null) {
+  const wd = toDate(date).getDay();
+  if (wd === 0 || wd === 6) return 'closed';
+  if (hash01(`off|${doctorId}|${date}`) < 0.12) return 'off';
+  if (time && hash01(`blk|${doctorId}|${date}|${time}`) < 0.3) return 'unavailable';
+  return 'open';
 }
 
 function randomCode(len = 4) {
@@ -74,6 +141,8 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
 
   const doctor = (id) => DOCTORS.find((d) => d.id === id);
   const record = (kind, b, extra = {}) => onRecord?.(kind, structuredClone(b), extra);
+  const today = () => isoDate(now());
+  const label = (b) => slotLabel(b.date, b.time, now());
 
   function log(kind, text) {
     events.push({ id: ++seq, kind, text, at: now() });
@@ -99,7 +168,7 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
       if (b.status === 'held' && b.holdExpiresAt <= now()) {
         bookings.delete(b.id);
         record('expired', b);
-        log('expired', `Hold ${b.id} expired — ${doctor(b.doctorId).short} ${slotLabel(b.day, b.time)} released`);
+        log('expired', `Hold ${b.id} expired — ${doctor(b.doctorId).short} ${label(b)} released`);
       }
     }
   }
@@ -109,21 +178,69 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     return null;
   }
 
-  function freeSlots(doctorId, { limit = Infinity } = {}) {
+  function isPast(date, time) {
+    const t = today();
+    if (date !== t) return date < t;
+    const d = new Date(now());
+    return toMin(time) <= d.getHours() * 60 + d.getMinutes();
+  }
+
+  // past | closed | off | unavailable | held | booked | open
+  function slotStatus(doctorId, date, time) {
+    if (isPast(date, time)) return 'past';
+    const base = scheduleStatus(doctorId, date, time);
+    if (base !== 'open') return base;
+    const b = bookingAt(slotId(doctorId, date, time));
+    if (b) return b.status === 'held' ? 'held' : 'booked';
+    return 'open';
+  }
+
+  function* upcoming(days = HORIZON_DAYS) {
+    const start = today();
+    for (let i = 0; i <= days; i++) {
+      const date = addDays(start, i);
+      for (const time of TIMES) yield { date, time };
+    }
+  }
+
+  const slotOf = (doctorId, date, time) => ({
+    id: slotId(doctorId, date, time), doctorId, date, time,
+    label: slotLabel(date, time, now()), range: slotRange(date, time, now()), dayLabel: dayWord(date, now()),
+  });
+
+  // Open slots from now, soonest first.
+  function freeSlots(doctorId, { limit = Infinity, days = HORIZON_DAYS } = {}) {
     sweep();
     const out = [];
-    for (const day of DAYS) {
-      for (const time of TIMES) {
-        const sid = slotId(doctorId, day, time);
-        if (!bookingAt(sid)) out.push({ id: sid, doctorId, day, time, label: slotLabel(day, time) });
-        if (out.length >= limit) return out;
-      }
+    for (const { date, time } of upcoming(days)) {
+      if (slotStatus(doctorId, date, time) === 'open') out.push(slotOf(doctorId, date, time));
+      if (out.length >= limit) break;
     }
     return out;
   }
 
+  // Month view for the availability calendar. month = "YYYY-MM".
+  function availability(doctorId, month) {
+    sweep();
+    if (!doctor(doctorId)) throw httpError(404, `Unknown doctor ${doctorId}`);
+    if (!/^\d{4}-\d{2}$/.test(String(month))) throw httpError(400, 'month must be YYYY-MM');
+    const t = today();
+    const last = addDays(t, HORIZON_DAYS);
+    const days = [];
+    for (let date = `${month}-01`; date.startsWith(month); date = addDays(date, 1)) {
+      const base = scheduleStatus(doctorId, date);
+      if (date < t) { days.push({ date, status: 'past', open: 0, slots: [] }); continue; }
+      if (date > last) { days.push({ date, status: 'beyond', open: 0, slots: [] }); continue; }
+      if (base !== 'open') { days.push({ date, status: base, open: 0, slots: [] }); continue; }
+      const slots = TIMES.map((time) => ({ id: slotId(doctorId, date, time), time, label: formatTime(time), status: slotStatus(doctorId, date, time) }));
+      const open = slots.filter((x) => x.status === 'open').length;
+      days.push({ date, status: open ? 'open' : 'full', open, dayLabel: dayWord(date, now()), slots });
+    }
+    return { doctorId, month, today: t, horizon: last, days };
+  }
+
   function insert(fields) {
-    const { doctorId, day, time } = parseSlotId(fields.slotId);
+    const { doctorId, date, time } = parseSlotId(fields.slotId);
     const b = {
       patient: { name: '', phone: '', address: '' },
       reason: '',
@@ -132,9 +249,9 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
       displacedFrom: null,
       createdAt: now(),
       ...fields,
-      doctorId, day, time,
-      label: slotLabel(day, time),
-      range: slotRange(day, time),
+      doctorId, date, time,
+      label: slotLabel(date, time, now()),
+      range: slotRange(date, time, now()),
     };
     bookings.set(b.id, b);
     return b;
@@ -144,25 +261,24 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     bookings = new Map();
     sms = [];
     events = [];
-    for (const s of SEED) {
-      insert({
-        id: newId('PVA'),
-        slotId: slotId(s.doctorId, 'today', s.time),
-        status: 'confirmed',
-        payment: 'paid',
-        reason: s.reason,
-        patient: { name: s.name, phone: '', address: '' },
-      });
+    for (const [doctorId, seeds] of Object.entries(SEED)) {
+      const open = freeSlots(doctorId, { limit: 6 });
+      for (const [pos, name, reason] of seeds) {
+        if (!open[pos]) continue;
+        insert({ id: newId('PVA'), slotId: open[pos].id, status: 'confirmed', payment: 'paid', reason, patient: { name, phone: '', address: '' } });
+      }
     }
     log('info', 'Clinic schedule loaded');
   }
 
-  // Place a 5-minute hold on a free slot.
+  // Place a 5-minute hold on an open slot.
   function hold({ slotId: sid, reason = '', patient = {}, meta = {} }) {
     sweep();
-    const { doctorId } = parseSlotId(sid);
+    const { doctorId, date, time } = parseSlotId(sid);
     if (!doctor(doctorId)) throw httpError(400, `Unknown doctor in slot ${sid}`);
-    if (bookingAt(sid)) throw httpError(409, 'That slot was just taken — pick another time.');
+    const st = slotStatus(doctorId, date, time);
+    if (st === 'booked' || st === 'held') throw httpError(409, 'That slot was just taken — pick another time.');
+    if (st !== 'open') throw httpError(409, `That time isn't available (${st}) — pick another time.`);
     const b = insert({
       id: newId('PVA'),
       slotId: sid,
@@ -174,7 +290,7 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
       meta,
     });
     record('held', b);
-    log('hold', `Hold ${b.id} — ${doctor(doctorId).short} ${slotLabel(b.day, b.time)} (5 min)`);
+    log('hold', `Hold ${b.id} — ${doctor(doctorId).short} ${label(b)} (5 min)`);
     return b;
   }
 
@@ -198,25 +314,26 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     b.payment = 'paid';
     delete b.holdExpiresAt;
     const d = doctor(b.doctorId);
-    const receipt = sendSms('patient', `Maple Clinic: Booking confirmed with ${d.name} (${d.title}), ${slotRange(b.day, b.time)}. Booking ID ${b.id}. Payment received. Reply C to cancel.`, 'receipt');
+    const receipt = sendSms('patient', `Maple Clinic: Booking confirmed with ${d.name} (${d.title}), ${fullRange(b.date, b.time)}. Booking ID ${b.id}. Payment received. Reply C to cancel.`, 'receipt');
     record('confirmed', b, { sms: receipt.body });
-    log('confirmed', `Booking ${b.id} confirmed — ${d.short} ${slotLabel(b.day, b.time)}`);
+    log('confirmed', `Booking ${b.id} confirmed — ${d.short} ${label(b)}`);
     return b;
   }
 
-  // Emergency: take the doctor's next same-day slot. If a normal booking
-  // already sits there, move it to the doctor's next free slot.
+  // Emergency: take the doctor's earliest upcoming slot. If a normal booking
+  // already sits there, move it to the doctor's next open slot.
   function emergency({ doctorId = 'patel', reason = 'Emergency', patient = {}, meta = {} } = {}) {
     sweep();
     if (!doctor(doctorId)) throw httpError(400, `Unknown doctor ${doctorId}`);
 
     let target = null;
-    for (const time of TIMES) {
-      const sid = slotId(doctorId, 'today', time);
+    for (const { date, time } of upcoming()) {
+      if (isPast(date, time) || scheduleStatus(doctorId, date, time) !== 'open') continue;
+      const sid = slotId(doctorId, date, time);
       const existing = bookingAt(sid);
       if (!existing || !existing.emergency) { target = { sid, existing }; break; }
     }
-    if (!target) throw httpError(409, `${doctor(doctorId).short} has no same-day capacity left.`);
+    if (!target) throw httpError(409, `${doctor(doctorId).short} has no capacity left.`);
 
     const ex = target.existing;
     if (ex) bookings.delete(ex.id);
@@ -240,23 +357,23 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
       log('released', `Hold ${ex.id} released for emergency`);
     } else if (ex) {
       const next = freeSlots(doctorId, { limit: 1 })[0];
-      const fromLabel = slotLabel(ex.day, ex.time);
+      const fromLabel = label(ex);
       if (next) {
-        displaced = insert({ ...ex, slotId: next.id, displaced: true, displacedFrom: { day: ex.day, time: ex.time } });
-        record('moved', displaced, { from: fromLabel, to: slotRange(next.day, next.time), reason: `Pre-empted by emergency ${b.id}` });
-        sendSms(ex.patient.name || 'patient', `Maple Clinic: Your ${fromLabel} appointment with ${d.short} moved to ${slotRange(next.day, next.time)} due to an emergency. Sorry for the inconvenience.`, 'displaced');
+        displaced = insert({ ...ex, slotId: next.id, displaced: true, displacedFrom: { date: ex.date, time: ex.time } });
+        record('moved', displaced, { from: fullRange(ex.date, ex.time), to: fullRange(next.date, next.time), reason: `Pre-empted by emergency ${b.id}` });
+        sendSms(ex.patient.name || 'patient', `Maple Clinic: Your ${fromLabel} appointment with ${d.short} moved to ${fullRange(next.date, next.time)} due to an emergency. Sorry for the inconvenience.`, 'displaced');
         log('displaced', `${ex.patient.name || ex.id} moved ${fromLabel} → ${next.label}`);
       } else {
         log('displaced', `${ex.patient.name || ex.id} (${fromLabel}) needs a manual reschedule — no free slots`);
       }
     }
 
-    const alert = sendSms('patient', `Maple Clinic EMERGENCY: ${d.name} is expecting you ${slotRange(b.day, b.time).replace(/ today$/, ' TODAY')}. Booking ID ${b.id}. If symptoms worsen, call emergency services (911) immediately.`, 'emergency');
+    const alert = sendSms('patient', `Maple Clinic EMERGENCY: ${d.name} is expecting you ${fullRange(b.date, b.time)}. Booking ID ${b.id}. If symptoms worsen, call emergency services (911) immediately.`, 'emergency');
     record('emergency', b, {
       sms: alert.body,
-      displaced: displaced ? { bookingId: displaced.id, patient: displaced.patient.name, from: slotLabel(displaced.displacedFrom.day, displaced.displacedFrom.time), to: displaced.range } : null,
+      displaced: displaced ? { bookingId: displaced.id, patient: displaced.patient.name, from: fullRange(displaced.displacedFrom.date, displaced.displacedFrom.time), to: fullRange(displaced.date, displaced.time) } : null,
     });
-    log('emergency', `EMERGENCY ${b.id} — ${d.short} ${slotLabel(b.day, b.time)}${displaced ? ' (pre-empted a normal booking)' : ''}`);
+    log('emergency', `EMERGENCY ${b.id} — ${d.short} ${label(b)}${displaced ? ' (pre-empted a normal booking)' : ''}`);
     return { booking: b, displaced };
   }
 
@@ -277,17 +394,23 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
 
   function snapshot() {
     sweep();
-    const list = [...bookings.values()].map((b) => ({
-      ...b,
-      doctorName: doctor(b.doctorId).name,
-      label: slotLabel(b.day, b.time),
-      range: slotRange(b.day, b.time),
-    }));
-    list.sort((a, b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day) || a.time.localeCompare(b.time) || a.doctorId.localeCompare(b.doctorId));
+    const t = today();
+    const list = [...bookings.values()]
+      .filter((b) => b.date >= t)
+      .map((b) => ({
+        ...b,
+        doctorName: doctor(b.doctorId).name,
+        label: slotLabel(b.date, b.time, now()),
+        range: slotRange(b.date, b.time, now()),
+        dayLabel: dayWord(b.date, now()),
+      }));
+    list.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time) || a.doctorId.localeCompare(b.doctorId));
     return {
       now: now(),
+      today: t,
+      clinicHours: CLINIC_HOURS,
       holdMs: HOLD_MS,
-      doctors: DOCTORS.map((d) => ({ ...d, freeSlots: freeSlots(d.id) })),
+      doctors: DOCTORS.map((d) => ({ ...d, freeSlots: freeSlots(d.id, { days: SNAPSHOT_DAYS }) })),
       bookings: list,
       sms: sms.slice(-20),
       events: events.slice(-20),
@@ -295,7 +418,7 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
   }
 
   reset();
-  return { reset, hold, release, pay, emergency, updatePatient, snapshot, freeSlots, get: (id) => bookings.get(id) };
+  return { reset, hold, release, pay, emergency, updatePatient, snapshot, freeSlots, availability, get: (id) => bookings.get(id) };
 }
 
 export function httpError(status, message) {

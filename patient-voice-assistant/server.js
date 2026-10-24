@@ -209,6 +209,12 @@ const routes = [
     sendJson(res, 200, { ...result, state: db.snapshot() });
   }],
 
+  // Availability calendar: GET /api/availability/<doctor>?month=YYYY-MM
+  ['GET', /^\/api\/availability\/([\w-]+)$/, (req, res, m) => {
+    const month = new URL(req.url, 'http://localhost').searchParams.get('month');
+    sendJson(res, 200, db.availability(m[1], month));
+  }],
+
   // --- Bookings database (data/bookings.json) ------------------------------
   ['GET', /^\/api\/booking-records$/, (req, res) => sendJson(res, 200, { bookings: records.list() })],
   ['GET', /^\/api\/booking-records\/([\w-]+)$/, (req, res, m) => {

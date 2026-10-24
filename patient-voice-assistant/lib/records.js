@@ -7,29 +7,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { DOCTORS, formatTime, slotRange, SLOT_MINUTES } from './db.js';
+import { DOCTORS, formatTime, endTime, fullRange, dayWord } from './db.js';
 
 const STATUS = { held: 'held', released: 'released', expired: 'expired', confirmed: 'confirmed', emergency: 'confirmed' };
 
-function isoDate(ms, dayOffset) {
-  const d = new Date(ms);
-  d.setDate(d.getDate() + dayOffset);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-function endTime(time) {
-  const [h, m] = time.split(':').map(Number);
-  const end = h * 60 + m + SLOT_MINUTES;
-  return `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
-}
-
-function slotOf(b, createdAt) {
+function slotOf(b, at) {
   return {
-    day: b.day,
-    date: isoDate(createdAt, b.day === 'tomorrow' ? 1 : 0),
+    date: b.date,
+    day: dayWord(b.date, at),
     start: formatTime(b.time),
     end: formatTime(endTime(b.time)),
-    range: slotRange(b.day, b.time),
+    range: fullRange(b.date, b.time),
   };
 }
 

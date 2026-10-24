@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
-  parseTimes, matchSlot, isConfirmation, isBookingIntent, extractPhone, extractAddress,
+  parseTimes, matchSlot, parseDate, parseDayPart, parseTimeConstraint, isQuestion, dayFocus, isConfirmation, isBookingIntent, extractPhone, extractAddress,
   extractName, extractDetails, highlightSegments, parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, isAddressFollowUp,
 } from '../public/js/keywords.js';
 
@@ -48,26 +48,28 @@ test('doctor detection incl. STT misspellings', () => {
 });
 
 test('time parsing', () => {
-  assert.deepEqual(parseTimes('10:30 works'), [{ time: '10:30', day: null }]);
-  assert.deepEqual(parseTimes('how about 2 pm tomorrow'), [{ time: '14:00', day: 'tomorrow' }]);
-  assert.deepEqual(parseTimes('two thirty today'), [{ time: '14:30', day: 'today' }]);
-  assert.deepEqual(parseTimes('half past nine'), [{ time: '09:30', day: null }]);
-  assert.deepEqual(parseTimes("eleven o'clock"), [{ time: '11:00', day: null }]);
-  assert.deepEqual(parseTimes('at 3'), [{ time: '15:00', day: null }]);
-  assert.deepEqual(parseTimes('hold it for 5 minutes'), []);
-  assert.deepEqual(parseTimes('10 a.m.'), [{ time: '10:00', day: null }]);
+  const N = new Date(2026, 9, 26, 8, 0).getTime(); // Monday Oct 26, 2026
+  assert.deepEqual(parseTimes('10:30 works', N), [{ time: '10:30', date: null }]);
+  assert.deepEqual(parseTimes('how about 2 pm tomorrow', N), [{ time: '14:00', date: '2026-10-27' }]);
+  assert.deepEqual(parseTimes('two thirty today', N), [{ time: '14:30', date: '2026-10-26' }]);
+  assert.deepEqual(parseTimes('half past nine', N), [{ time: '09:30', date: null }]);
+  assert.deepEqual(parseTimes("eleven o'clock", N), [{ time: '11:00', date: null }]);
+  assert.deepEqual(parseTimes('at 3', N), [{ time: '15:00', date: null }]);
+  assert.deepEqual(parseTimes('hold it for 5 minutes', N), []);
+  assert.deepEqual(parseTimes('10 a.m.', N), [{ time: '10:00', date: null }]);
 });
 
-test('matchSlot prefers spoken day, then today', () => {
+test('matchSlot: spoken date if given, otherwise the soonest', () => {
   const free = [
-    { id: 'a', day: 'today', time: '10:00' },
-    { id: 'b', day: 'tomorrow', time: '10:00' },
-    { id: 'c', day: 'tomorrow', time: '14:00' },
+    { id: 'a', date: '2026-10-26', time: '10:00' },
+    { id: 'b', date: '2026-10-27', time: '10:00' },
+    { id: 'c', date: '2026-10-27', time: '14:00' },
   ];
-  assert.equal(matchSlot(parseTimes('10 am'), free).id, 'a');
-  assert.equal(matchSlot(parseTimes('10 am tomorrow'), free).id, 'b');
-  assert.equal(matchSlot(parseTimes('2pm'), free).id, 'c');
-  assert.equal(matchSlot(parseTimes('9am'), free), null);
+  const N = new Date(2026, 9, 26, 8, 0).getTime();
+  assert.equal(matchSlot(parseTimes('10 am', N), free).id, 'a');
+  assert.equal(matchSlot(parseTimes('10 am tomorrow', N), free).id, 'b');
+  assert.equal(matchSlot(parseTimes('2pm', N), free).id, 'c');
+  assert.equal(matchSlot(parseTimes('9am', N), free), null);
 });
 
 test('intents', () => {
@@ -169,8 +171,9 @@ test('emergency routing: bones → Kim, babies → Rahman', () => {
 });
 
 test('times: a spoken 30-minute range is one appointment time', () => {
-  assert.deepEqual(parseTimes("Great, I'm holding Dr. Kim for you, 11:00 AM to 11:30 AM today."), [{ time: '11:00', day: 'today' }]);
-  assert.deepEqual(parseTimes('3:30 PM to 4:00 PM tomorrow works'), [{ time: '15:30', day: 'tomorrow' }]);
+  const N = new Date(2026, 9, 26, 8, 0).getTime();
+  assert.deepEqual(parseTimes("Great, I'm holding Dr. Kim for you, 11:00 AM to 11:30 AM today.", N), [{ time: '11:00', date: '2026-10-26' }]);
+  assert.deepEqual(parseTimes('3:30 PM to 4:00 PM tomorrow works', N), [{ time: '15:30', date: '2026-10-27' }]);
   assert.equal(parseTimes('Open times are 10:00 AM today, 10:30 AM today or 11:00 AM today').length, 3);
 });
 
@@ -194,4 +197,42 @@ test('address follow-ups from Ava are detected; read-backs are not', () => {
     'Just a final check: your name is Ana, your address is Unit 5, 22 King Street, and your phone number is 647. Is that all correct?',
     "What's your home address?",
   ]) assert.equal(isAddressFollowUp(q), false, q);
+});
+
+test('dates: resolved against now, never in the past', () => {
+  const N = new Date(2026, 9, 24, 22, 0).getTime(); // Saturday Oct 24, 2026, 10 PM
+  assert.equal(parseDate('tomorrow', N), '2026-10-25');
+  assert.equal(parseDate('the day after tomorrow', N), '2026-10-26');
+  assert.equal(parseDate('can I come Monday?', N), '2026-10-26');
+  assert.equal(parseDate('next Friday please', N), '2026-10-30');
+  assert.equal(parseDate('on Saturday', N), '2026-10-31'); // a week out, not today
+  assert.equal(parseDate('October 28th', N), '2026-10-28');
+  assert.equal(parseDate('the 3rd of November', N), '2026-11-03');
+  assert.equal(parseDate('the 2nd', N), '2026-11-02'); // already passed this month
+  assert.equal(parseDate('January 5', N), '2027-01-05');
+  assert.equal(parseDate('next week', N), '2026-10-26');
+  assert.equal(parseDate('10:30 works', N), null);
+  assert.deepEqual(parseTimes('Tuesday at 10:30', N), [{ time: '10:30', date: '2026-10-27' }]);
+  assert.deepEqual(parseTimes('9:30 AM on Thursday, Nov 5', N), [{ time: '09:30', date: '2026-11-05' }]);
+  assert.equal(parseDayPart('anything Wednesday morning?'), 'morning');
+  assert.equal(parseDayPart('after lunch is better'), 'afternoon');
+});
+
+test('time constraints are filters, not picks; questions are detected', () => {
+  assert.deepEqual(parseTimeConstraint('Do you have any time after 3 p.m.?'), { kind: 'after', time: '15:00' });
+  assert.deepEqual(parseTimeConstraint('something before 11'), { kind: 'before', time: '11:00' });
+  assert.deepEqual(parseTimeConstraint('from 2:30 onwards'), { kind: 'from', time: '14:30' });
+  assert.equal(parseTimeConstraint("I've had back pain from 2 weeks"), null);
+  assert.equal(parseTimeConstraint('10:30 works'), null);
+  assert.ok(isQuestion('Do you have 10:30 on Thursday?'));
+  assert.ok(isQuestion('is there anything Wednesday'));
+  assert.equal(isQuestion('10:30 on Thursday works'), false);
+});
+
+test('dayFocus: the one day a sentence is about', () => {
+  const N = new Date(2026, 9, 24, 22, 0).getTime(); // Saturday Oct 24
+  assert.equal(dayFocus('Thursday works. Dr. Patel has openings at 9:30 AM or 3:30 PM.', N), '2026-10-29');
+  assert.equal(dayFocus('9:30 AM on Thursday, Nov 5', N), '2026-11-05');
+  assert.equal(dayFocus('10:30 AM on Monday or 2:30 PM on Tuesday', N), 'multi');
+  assert.equal(dayFocus('Okay, three thirty p.m.', N), null);
 });

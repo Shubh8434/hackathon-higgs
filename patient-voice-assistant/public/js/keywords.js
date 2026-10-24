@@ -107,8 +107,84 @@ export function detectDoctor(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Dates: "today", "tomorrow", "day after tomorrow", "Monday", "next Friday",
+// "October 28", "28th of October", "the 3rd", "next week". Resolved against
+// `now` to a local ISO date ("YYYY-MM-DD"), never in the past.
+// ---------------------------------------------------------------------------
+const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const MONTH_RE = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+const MONTH_IDX = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
+export function isoDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+export function parseDate(text, now = Date.now()) {
+  const t = norm(text);
+  const base = new Date(now);
+  base.setHours(0, 0, 0, 0);
+  const plus = (n) => { const d = new Date(base); d.setDate(d.getDate() + n); return isoDate(d); };
+
+  if (/\bday after tomorrow\b/.test(t)) return plus(2);
+  if (/\btomorrow\b/.test(t)) return plus(1);
+  if (/\btoday\b|\btonight\b|\bthis (?:morning|afternoon|evening)\b/.test(t)) return plus(0);
+
+  // "October 28", "Oct 28th", "28th of October", "28 October"
+  const md = new RegExp(`\\b${MONTH_RE}\\.? (\\d{1,2})(?:st|nd|rd|th)?\\b`).exec(t);
+  const dm = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?(?: of)? ${MONTH_RE}\\b`).exec(t);
+  const hit = md ? { mon: md[1], day: Number(md[2]) } : dm ? { mon: dm[2], day: Number(dm[1]) } : null;
+  if (hit && hit.day >= 1 && hit.day <= 31) {
+    const d = new Date(base.getFullYear(), MONTH_IDX[hit.mon.slice(0, 3)], hit.day);
+    if (d < base) d.setFullYear(d.getFullYear() + 1);
+    return isoDate(d);
+  }
+
+  // "the 3rd" → that day this month, or next month if it has passed
+  const nth = /\bthe (\d{1,2})(?:st|nd|rd|th)\b/.exec(t);
+  if (nth && Number(nth[1]) <= 31) {
+    const d = new Date(base.getFullYear(), base.getMonth(), Number(nth[1]));
+    if (d < base) d.setMonth(d.getMonth() + 1);
+    return isoDate(d);
+  }
+
+  // "Monday", "this Friday", "next Tuesday" → the next one after today
+  const wd = new RegExp(`\\b(?:(next|this|on|coming) )?(${WEEKDAY_NAMES.join('|')})\\b`).exec(t);
+  if (wd) {
+    const target = WEEKDAY_NAMES.indexOf(wd[2]);
+    let diff = (target - base.getDay() + 7) % 7;
+    if (diff === 0) diff = wd[1] === 'this' ? 0 : 7;
+    return plus(diff);
+  }
+
+  if (/\bnext week\b/.test(t)) return plus(((8 - base.getDay()) % 7) || 7); // next Monday
+  return null;
+}
+
+// The one day a sentence is about, 'multi' if it names several days
+// ("10 AM Monday or 2 PM Tuesday"), or null if it names none.
+export function dayFocus(text, now = Date.now()) {
+  const t = norm(text);
+  const refs = new Set();
+  for (const m of t.matchAll(new RegExp(`\\b(?:today|tomorrow|${WEEKDAY_NAMES.join('|')})\\b`, 'g'))) refs.add(m[0]);
+  for (const m of t.matchAll(new RegExp(`\\b${MONTH_RE}\\.? \\d{1,2}`, 'g'))) refs.add(m[0]);
+  const weekdays = [...refs].filter((r) => WEEKDAY_NAMES.includes(r));
+  // "Thursday, Nov 5" is one day: a weekday plus its date.
+  if (refs.size === 2 && weekdays.length === 1 && [...refs].some((r) => /\d/.test(r))) return parseDate(text, now);
+  if (refs.size > 1) return 'multi';
+  return refs.size ? parseDate(text, now) : null;
+}
+
+// "morning" | "afternoon" | null
+export function parseDayPart(text) {
+  const t = norm(text);
+  if (/\bmorning\b|\bearly\b|\bbefore (?:noon|lunch)\b/.test(t)) return 'morning';
+  if (/\bafternoon\b|\bafter (?:noon|lunch)\b|\blater in the day\b/.test(t)) return 'afternoon';
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Times: "10:30", "10.30", "2 pm", "two thirty", "half past ten", "at 9",
-// "11 o'clock", "noon". Returns [{ time: 'HH:MM', day: 'today'|'tomorrow'|null }].
+// "11 o'clock", "noon". Returns [{ time: 'HH:MM', date: 'YYYY-MM-DD'|null }].
 // ---------------------------------------------------------------------------
 const NUM_WORDS = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
@@ -139,14 +215,14 @@ function to24(h, m, ampm) {
 // "11:00 AM to 11:30 AM" is one appointment: drop the end of a range.
 const RANGE_END = /(\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?)\s*(?:to|until|till|-|–)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?/g;
 
-export function parseTimes(text) {
+export function parseTimes(text, now = Date.now()) {
   const t = wordsToDigits(norm(text)).replace(RANGE_END, (m, start) => (/[:.]\d{2}|[ap]\.?m/.test(m) ? start : m));
-  const day = /\btomorrow\b/.test(t) ? 'tomorrow' : /\btoday\b|\bthis (?:morning|afternoon)\b/.test(t) ? 'today' : null;
+  const date = parseDate(text, now);
   const out = [];
   const seen = new Set();
   const push = (h, m, ampm) => {
     const time = to24(Number(h), Number(m || 0), ampm && ampm.replace(/\./g, ''));
-    if (time && !seen.has(time)) { seen.add(time); out.push({ time, day }); }
+    if (time && !seen.has(time)) { seen.add(time); out.push({ time, date }); }
   };
   const AMPM = '(a\\.?m\\.?|p\\.?m\\.?)';
   const patterns = [
@@ -167,11 +243,31 @@ export function parseTimes(text) {
   return out;
 }
 
-// Pick the free slot matching a spoken time (prefers the spoken day, then today).
+// "after 3 pm", "later than 2", "from 2:30", "before 11", "no later than 10"
+// → { kind: 'after' | 'from' | 'before', time: 'HH:MM' }. A constraint, not a pick.
+export function parseTimeConstraint(text) {
+  const t = wordsToDigits(norm(text));
+  const m = /\b(after|later than|from|before|earlier than|no later than|by)\s+(\d{1,2}(?:[:.]\d{2})?)\s*(a\.?m\.?|p\.?m\.?)?(?!\s*(?:days?|weeks?|months?|years?|hours?|minutes?|mins?)\b)/.exec(t);
+  if (!m) return null;
+  const [h, mm = '0'] = m[2].split(/[:.]/);
+  const time = to24(Number(h), Number(mm), m[3] && m[3].replace(/\./g, ''));
+  if (!time) return null;
+  const kind = /^(after|later than)$/.test(m[1]) ? 'after' : m[1] === 'from' ? 'from' : 'before';
+  return { kind, time };
+}
+
+// A question about availability ("do you have…?", "is 3 open?") rather than a choice.
+export function isQuestion(text) {
+  const t = norm(text).trim();
+  return /\?$/.test(t) || /^(?:do|does|is|are|any|anything|can|could|would|have you got|what about|how about|is there)\b/.test(t);
+}
+
+// Pick the open slot matching a spoken time: on the spoken date if given,
+// otherwise the soonest one (slots are sorted soonest first).
 export function matchSlot(times, freeSlots) {
-  for (const { time, day } of times) {
-    const candidates = freeSlots.filter((s) => s.time === time && (!day || s.day === day));
-    if (candidates.length) return candidates.find((s) => s.day === 'today') || candidates[0];
+  for (const { time, date } of times) {
+    const hit = freeSlots.find((s) => s.time === time && (!date || s.date === date));
+    if (hit) return hit;
   }
   return null;
 }
@@ -193,7 +289,7 @@ export function parseChoice(text) {
 
 // Assistant says it has put a hold on / reserved a time.
 export function isHoldAnnouncement(text) {
-  return /\b(?:holding|hold(?:ing)? (?:it|that|the)|on hold|reserv(?:ed|ing)|booked you|put you down)\b/.test(norm(text));
+  return /\b(?:holding|hold(?:ing)? (?:it|that|the)|on hold|reserv(?:ed|ing)|booked you|put you down|got you down|have you down|booking you)\b/.test(norm(text));
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +464,7 @@ export function isPayPrompt(text) {
 // ---------------------------------------------------------------------------
 const HL_RED = "call emergency services|emergency services|call 911|911|emergency|ambulance|severe(?:ly)?|urgent(?:ly)?|chest pain|chest pressure|can'?t breathe|cannot breathe|short(?:ness)? of breath|trouble breathing|difficulty breathing|heart attack|stroke|seizure|unconscious|passed out|bleeding|immediately|right away|life[- ]threatening|head injury|concussion|poison(?:ed|ing)?|choking|dislocated|disoriented|overdose";
 const HL_AMBER = "credit card|co-?pay|payment|payments|paying|paid|pay|card|fees?|costs?|price|charged?|receipt|insurance|billing|invoice|deposit|refund|done button";
-const HL_BLUE = "(?:Dr\\.?|Doctor) (?:(?:Sarah|James|Maria|David|Aisha) )?(?:Patel|Chen|Lopez|Kim|Rahman)|Patel|Chen|Lopez|Kim|Rahman|\\d{1,2}[:.]\\d{2}(?:\\s*[ap]\\.?m\\b\\.?)?|\\d{1,2}\\s*[ap]\\.?m\\b\\.?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?: thirty| o'?clock)|half past \\w+|noon|today|tomorrow|this morning|this afternoon|o'?clock";
+const HL_BLUE = "(?:Dr\\.?|Doctor) (?:(?:Sarah|James|Maria|David|Aisha) )?(?:Patel|Chen|Lopez|Kim|Rahman)|Patel|Chen|Lopez|Kim|Rahman|\\d{1,2}[:.]\\d{2}(?:\\s*[ap]\\.?m\\b\\.?)?|\\d{1,2}\\s*[ap]\\.?m\\b\\.?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?: thirty| o'?clock)|half past \\w+|noon|today|tomorrow|this morning|this afternoon|o'?clock|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\\.? \\d{1,2}(?:st|nd|rd|th)?";
 
 const HL_RE = new RegExp(`(\\b(?:${HL_RED})\\b)|(\\b(?:${HL_AMBER})\\b|\\$\\d+(?:\\.\\d{2})?)|(\\b(?:${HL_BLUE})\\b)`, 'gi');
 
