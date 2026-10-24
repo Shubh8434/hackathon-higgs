@@ -10,7 +10,7 @@ import { api } from './api.js';
 import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
   parseTimes, matchSlot, isConfirmation, isBookingIntent, isPaymentDone, extractDetails,
-  parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, cleanAddress, isAddressFollowUp,
+  parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, validPhoneDigits, cleanAddress, isAddressFollowUp,
   parseDate, parseDayPart, isoDate, parseTimeConstraint, isQuestion, dayFocus,
   isRescheduleIntent, isCancelChange, extractBookingId, SPECIALTY_DOCTOR,
 } from './keywords.js';
@@ -671,7 +671,13 @@ export class Orchestrator {
           // Probably mid-number ("six four seven…"): tell Ava to wait for the rest.
           return this.respond(`Got ${spaced(s.phoneBuffer)}. Please go on with the rest of the number.`);
         }
-        found.phone = formatPhone(s.phoneBuffer.slice(0, 15));
+        const valid = validPhoneDigits(s.phoneBuffer);
+        if (!valid) {
+          const n = s.phoneBuffer.length;
+          s.phoneBuffer = '';
+          return this.respond(`That's ${n} digits, but a phone number has 10. Could you say the full number again?`);
+        }
+        found.phone = formatPhone(valid);
       } else if (s.phoneBuffer) {
         // They stopped short ("yep") with fewer than 10 digits.
         const have = s.phoneBuffer;
@@ -679,7 +685,14 @@ export class Orchestrator {
         return this.respond(`I only got ${have.length} digits, ${spaced(have)}. A phone number has 10 digits. Could you say the full number again?`);
       }
     }
-    const changed = await this.savePatient(found);
+    let changed = await this.savePatient(found);
+    // Repeated a value we already have (e.g. the same phone after "say it
+    // again"): that answers the question, so move on.
+    if (!changed && FIELDS.includes(s.awaiting) && found[s.awaiting] && found[s.awaiting] === s.patient[s.awaiting]) {
+      s.awaiting = this.missingField() || (s.mode !== 'emergency' && s.hold ? 'confirm' : null);
+      this.changed();
+      changed = true;
+    }
     if (!changed && symptomatic && s.mode === 'emergency') return; // the triggering sentence itself
     const asking = FIELDS.includes(s.awaiting);
     if (!changed) {
@@ -704,7 +717,15 @@ export class Orchestrator {
     const s = this.s;
     const found = extractDetails(text, null);
     const digits = phoneDigits(text);
-    if (!found.phone && /\b(?:phone|number)\b/i.test(text) && digits.length >= 7) found.phone = formatPhone(digits.slice(0, 15));
+    if (!found.phone && /\b(?:phone|number)\b/i.test(text) && digits.length >= 7) {
+      // A corrected number that isn't 10 digits: ask for it again.
+      if (!validPhoneDigits(digits)) {
+        Object.assign(s, { awaiting: 'phone', phoneBuffer: '' });
+        this.changed();
+        return this.respond(`I only got ${digits.length} digits. A phone number has 10. Could you say the full number again?`);
+      }
+      found.phone = formatPhone(validPhoneDigits(digits));
+    }
     if (await this.savePatient(found)) return this.respond(this.detailsWrapUp());
     if (isConfirmation(text)) {
       s.awaiting = 'payment';

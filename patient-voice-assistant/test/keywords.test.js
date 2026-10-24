@@ -259,3 +259,11 @@ test('details: a time given while a name is expected is not an address', () => {
   assert.equal(extractDetails('I think for me, 3 p.m. would be good time. Hello.', 'name').address, undefined);
   assert.equal(extractDetails('Street East one two three', 'name').address, 'Street East 123');
 });
+
+test('phone numbers must have exactly 10 digits (or 11 with a leading 1)', () => {
+  assert.equal(extractPhone('six four seven nine two zero four five four'), null); // 9 digits
+  assert.equal(extractPhone('123456789'), null);
+  assert.equal(extractPhone('my number is 1 647 920 4548'), '(647) 920-4548');
+  assert.equal(extractPhone('647 920 45481 2'), null); // 12 digits
+  assert.equal(extractReadback('your phone number is 647920454.').phone, undefined);
+});

@@ -336,6 +336,13 @@ export function isPaymentDone(text) {
 // ---------------------------------------------------------------------------
 const DIGIT_WORDS = { zero: 0, oh: 0, o: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
 
+// A valid phone number: exactly 10 digits, or 11 with a leading country code 1.
+export function validPhoneDigits(digits) {
+  const d = String(digits || '');
+  if (d.length === 11 && d[0] === '1') return d.slice(1);
+  return d.length === 10 ? d : null;
+}
+
 export function formatPhone(digits) {
   if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
   return digits;
@@ -346,9 +353,8 @@ export function extractPhone(text) {
   // "5 5 5 1 2 3 4" or "555-123-4567" or "(416) 555 0199" or "8 4 3, 4 6 2, ..."
   const m = /(\+?\d[\d\s().,-]{5,}\d)/.exec(t);
   if (!m) return null;
-  const digits = m[1].replace(/\D/g, '');
-  if (digits.length < 7 || digits.length > 15) return null;
-  return formatPhone(digits);
+  const digits = validPhoneDigits(m[1].replace(/\D/g, ''));
+  return digits ? formatPhone(digits) : null; // 9 digits etc. → not a phone yet
 }
 
 // Every digit in a reply to "what's your phone number?", including STT

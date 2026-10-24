@@ -33,6 +33,18 @@ export function createBookingRecords({ file, now = () => Date.now() }) {
     fs.renameSync(tmp, file);
   }
 
+  // Holds only live in server memory, so any still "held" at startup were
+  // lost when the server stopped: record them as expired.
+  let stale = 0;
+  for (const r of Object.values(records)) {
+    if (r.status !== 'held') continue;
+    r.status = 'expired';
+    r.history.push({ at: now(), event: 'expired', detail: 'Hold lost when the server restarted (never paid)' });
+    r.updatedAt = now();
+    stale++;
+  }
+  if (stale) persist();
+
   // Called by the clinic DB on every booking change.
   function apply(kind, b, extra = {}) {
     let r = records[b.id];

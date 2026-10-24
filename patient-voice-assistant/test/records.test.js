@@ -76,3 +76,14 @@ test('records: confirmed upcoming bookings are restored into the schedule on res
   assert.equal(back.patient.phone, '(647) 555-0123');
   assert.ok(db.reschedule(held.id, db.freeSlots('lopez', { limit: 1 })[0].id));
 });
+
+test('records: holds still "held" at startup are marked expired', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pva-rec-')), 'bookings.json');
+  const records = createBookingRecords({ file });
+  const db = createDb({ onRecord: records.apply, idTaken: records.has });
+  const held = db.hold({ slotId: db.freeSlots('patel', { limit: 1 })[0].id }); // server "stops" here
+  const after = createBookingRecords({ file }).get(held.id);
+  assert.equal(after.status, 'expired');
+  assert.equal(after.history.at(-1).event, 'expired');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).bookings[held.id].status, 'expired');
+});
