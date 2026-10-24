@@ -1,8 +1,8 @@
-# Patient Voice Assistant
+# Code Blue
 
-> "A voice assistant that books care, and when it's an emergency, it puts the patient first, automatically."
+> **A voice agent for clinics that handles appointment booking, rescheduling and emergency triage.**
 
-A live voice agent for a mock clinic, built on Boson AI's Higgs Audio APIs. Ava books, reschedules and triages appointments in a natural conversation, and acts on a real clinic calendar.
+Code Blue is built on Boson AI's Higgs Audio APIs. Its assistant, Ava, answers for a mock clinic (Maple Clinic): she books, reschedules and triages appointments in a natural conversation, and acts on a real clinic calendar.
 
 - **Higgs Realtime** runs the conversation: full-duplex voice, server VAD, barge-in and live captions.
 - **Higgs STT 3.1** transcribes the patient inside the Realtime session. Every decision, including the emergency safety net, reads that transcript.
@@ -14,14 +14,15 @@ A live voice agent for a mock clinic, built on Boson AI's Higgs Audio APIs. Ava 
 | --- | --- |
 | **Event** | Higgs Audio Hackathon 2026 (Boson AI) |
 | **Track** | Agents That Act |
-| **One-liner** | A voice agent that books, reschedules and triages clinic appointments, and when it hears an emergency, gives the patient the nearest slot automatically. |
+| **Project** | Code Blue |
+| **One-liner** | A voice agent for clinics that handles appointment booking, rescheduling and emergency triage. |
 | **Team** | Shubham Sharma ([@Shubh8434](https://github.com/Shubh8434)) |
 | **Code** | This folder of [Shubh8434/hackathon-higgs](https://github.com/Shubh8434/hackathon-higgs), tag `submission` |
-| **Docs** | [Project summary (PDF)](Patient_Voice_Assistant_Project_Summary.pdf) · [Higgs API feedback report (PDF)](Higgs_API_Feedback_Report.pdf) |
+| **Docs** | [Project summary (PDF)](CodeBlue_Project_Summary.pdf) · [Higgs API feedback report (PDF)](Higgs_API_Feedback_Report.pdf) |
 
 ### Write-up
 
-Maple Clinic's assistant, Ava, books, reschedules and triages medical appointments in a natural, phone-style voice conversation. Patients describe their problem, and Ava picks the right specialist, checks a live 90-day calendar and offers the nearest open times. She understands requests like "anything Wednesday afternoon after 3?", collects name, address and phone one at a time, reads them back for a final check, and opens a payment screen. Receipts arrive as SMS on a virtual phone, and the clinic dashboard updates live.
+Code Blue is a voice receptionist for clinics. Its assistant, Ava, books, reschedules and triages appointments in a natural, phone-style conversation. Patients describe their problem, and Ava picks the right specialist, checks a live 90-day calendar and offers the nearest open times. She understands requests like "anything Wednesday afternoon after 3?", collects name, address and phone one at a time, reads them back for a final check, and opens a payment screen. Receipts arrive as SMS, and the clinic dashboard updates live.
 
 The differentiator is emergency pre-emption. A safety net scans the live, partial transcript for red flags such as chest pain, stroke signs or choking. The moment one appears, the screen turns red and Ava gives the patient the nearest same-day slot with the right doctor, moving whoever was booked there and texting them. On Sundays or after hours she tells the patient to call 911 and books a priority follow-up instead.
 

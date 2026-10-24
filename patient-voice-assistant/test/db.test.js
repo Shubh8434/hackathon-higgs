@@ -88,8 +88,14 @@ test('emergency (Mon–Sat, specialist in today): nearest slot, pre-empting the 
   assert.equal(booking.payment, 'waived');
   assert.equal(displaced.id, seeded.id);
   assert.deepEqual(displaced.displacedFrom, { date: seeded.date, time: seeded.time });
-  const kinds = db.snapshot().sms.map((x) => x.kind);
-  assert.ok(kinds.includes('emergency') && kinds.includes('displaced'));
+  let kinds = db.snapshot().sms.map((x) => x.kind);
+  assert.ok(kinds.includes('displaced'));
+  assert.ok(!kinds.includes('emergency'), 'no confirmation text before the details are collected');
+  db.updatePatient(booking.id, { name: 'Ana Diaz', address: '22 Queen St' });
+  assert.ok(!db.snapshot().sms.some((x) => x.kind === 'emergency'));
+  db.updatePatient(booking.id, { phone: '(647) 555-0123' });
+  kinds = db.snapshot().sms.map((x) => x.kind);
+  assert.equal(kinds.filter((k) => k === 'emergency').length, 1, 'sent once, when details are complete');
   assert.equal(db.availability('chen', '2026-10').days.find((d) => d.date === '2026-10-27').slots.find((x) => x.time === booking.time).status, 'emergency');
 });
 
@@ -112,7 +118,7 @@ test('emergency on Saturday: same-day like any working day', () => {
 
 test('emergency on Sunday or after hours: ER advice + priority follow-up next working day', () => {
   const db = createDb({ now: clock(at(2026, 11, 1, 10)).now }); // Sunday
-  const sun = db.emergency({ doctorId: 'chen' }).booking;
+  const sun = db.emergency({ doctorId: 'chen', patient: { name: 'Ana', address: '1 King St', phone: '(647) 555-0123' } }).booking;
   assert.equal(sun.triage, 'er-followup');
   assert.equal(sun.closedReason, 'sunday');
   assert.equal(sun.date, '2026-11-02');

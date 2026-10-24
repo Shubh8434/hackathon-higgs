@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Maple Clinic · Patient Voice Assistant</title>
+  <title>Code Blue · Maple Clinic</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✚</text></svg>" />
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -12,8 +12,8 @@
     <div class="brand">
       <span class="logo">✚</span>
       <div>
-        <h1>Patient Voice Assistant</h1>
-        <p class="tagline">Books care — and when it's an emergency, puts the patient first, automatically.</p>
+        <h1>Code Blue</h1>
+        <p class="tagline">A voice agent for clinics that handles appointment booking, rescheduling and emergency triage.</p>
       </div>
     </div>
     <div class="top-right">
@@ -25,7 +25,7 @@
       <span class="pill-status mono" title="Saved once the conversation starts">💾 <span id="convId">new</span></span>
       <select id="convSelect" class="small" title="Open a saved conversation"><option value="">History…</option></select>
       <span class="key-status"><span class="dot" id="keyDot"></span><span id="keyLabel">checking…</span></span>
-      <button class="ghost small" id="backupBtn" title="Play the recorded backup demo video">🎞 Backup video</button>
+      <button class="ghost small hidden" id="backupBtn" title="Play the recorded backup demo video">🎞 Backup video</button>
       <button class="ghost small" id="resetBtn" title="Reseed clinic, clear conversation">↺ Reset demo</button>
     </div>
   </header>
@@ -116,13 +116,13 @@
           <button class="danger hidden" id="disconnectBtn">■ End session</button>
           <label class="inline">Voice
             <select id="voiceSelect">
-              <option value="nora">nora</option>
-              <option value="chloe">chloe</option>
-              <option value="eleanor">eleanor</option>
-              <option value="jake">jake</option>
-              <option value="marcus">marcus</option>
-              <option value="oliver">oliver</option>
-              <option value="default">default</option>
+              <option value="nora">Nora</option>
+              <option value="chloe">Chloe</option>
+              <option value="eleanor">Eleanor</option>
+              <option value="jake">Jake</option>
+              <option value="marcus">Marcus</option>
+              <option value="oliver">Oliver</option>
+              <option value="default">Default</option>
             </select>
           </label>
           <div class="mic-meter" id="micMeter" title="Mic level"><span></span></div>
@@ -151,7 +151,7 @@
             <button class="chip danger-chip" data-phrase="It's urgent">“It's urgent”</button>
             <button class="chip" data-phrase="Book me a normal appointment">“Book me a normal appointment”</button>
             <button class="chip" data-phrase="I'd like to book a routine checkup">“Routine checkup”</button>
-            <button class="chip" data-phrase="10:30 tomorrow works">“10:30 tomorrow works”</button>
+            <button class="chip" data-phrase="The first one works for me">“The first one”</button>
             <button class="chip" data-phrase="I want to reschedule my appointment">“Reschedule my appointment”</button>
             <button class="chip" data-phrase="My name is Ana Diaz, I live at 22 Queen Street, my number is 647 555 0123">“Name, address, phone”</button>
             <button class="chip" id="replayBtn" disabled>↻ Replay last</button>
@@ -175,7 +175,7 @@
       <div class="phone" id="phone">
         <div class="phone-notch"></div>
         <div class="phone-screen">
-          <div class="phone-bar"><span>9:41</span><span>●●● 5G ▮</span></div>
+          <div class="phone-bar"><span id="phoneTime">9:41</span><span>●●● 5G ▮</span></div>
           <div class="phone-app">
             <div class="phone-title">Messages <span class="phone-badge" id="phoneBadge"></span></div>
             <div class="phone-from">Maple Clinic</div>

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   detectRedFlag, detectModelEmergency, detectSpecialty, detectDoctor, emergencyDoctorFor,
-  parseTimes, matchSlot, parseDate, parseDayPart, parseTimeConstraint, isQuestion, dayFocus, isRescheduleIntent, isCancelChange, extractBookingId, isConfirmation, isBookingIntent, extractPhone, extractAddress,
+  parseTimes, matchSlot, parseDate, parseDayPart, parseTimeConstraint, isQuestion, dayFocus, isRescheduleIntent, isCancelChange, extractBookingId, isSmallTalk, isConfirmation, isBookingIntent, extractPhone, extractAddress,
   extractName, extractDetails, highlightSegments, parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, isAddressFollowUp,
 } from '../public/js/keywords.js';
 
@@ -266,4 +266,9 @@ test('phone numbers must have exactly 10 digits (or 11 with a leading 1)', () =>
   assert.equal(extractPhone('my number is 1 647 920 4548'), '(647) 920-4548');
   assert.equal(extractPhone('647 920 45481 2'), null); // 12 digits
   assert.equal(extractReadback('your phone number is 647920454.').phone, undefined);
+});
+
+test('small talk is recognised, real requests are not', () => {
+  for (const t of ['Hi. How are you?', 'Hi Eva, how are you?', 'Hello there', 'Good morning', 'hey']) assert.ok(isSmallTalk(t), t);
+  for (const t of ['I have a fever', 'Hi, I want to book an appointment', 'I think I have a cold', 'Hi, my back hurts']) assert.equal(isSmallTalk(t), false, t);
 });

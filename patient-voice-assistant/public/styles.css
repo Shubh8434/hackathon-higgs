@@ -365,3 +365,10 @@ mark.kw-red { background: var(--red-bg); color: var(--red); }
 .pipeline .pl-total { margin-left: auto; }
 .pipeline .pl-total b { color: var(--text, #e6edf5); }
 .pipeline .pl-flag { flex-basis: 100%; color: #ffb3b3; }
+
+/* ---------- Code Blue brand ---------- */
+.logo { background: linear-gradient(135deg, #2f7bff, #5aa9ff 60%, #7fd3ff) !important; color: #fff; box-shadow: 0 0 0 0 rgba(90,169,255,.55); animation: codepulse 2.4s ease-out infinite; }
+@keyframes codepulse { 0% { box-shadow: 0 0 0 0 rgba(90,169,255,.55); } 70% { box-shadow: 0 0 0 12px rgba(90,169,255,0); } 100% { box-shadow: 0 0 0 0 rgba(90,169,255,0); } }
+.topbar h1 { font-size: 24px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; background: linear-gradient(90deg, #ffffff, #8cc4ff 55%, #5aa9ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.tagline { color: #b9c7d8; font-size: 13.5px; }
+body.is-emergency .logo { background: linear-gradient(135deg, #ff4d4d, #ff8080) !important; animation-duration: .9s; }

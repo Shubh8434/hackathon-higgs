@@ -323,6 +323,14 @@ export function extractBookingId(text) {
   return `${prefix}-${m[2].replace(/[^a-z0-9]/g, '').toUpperCase()}`;
 }
 
+// Small talk with no request in it: "hi", "how are you?", "good morning".
+export function isSmallTalk(text) {
+  const t = norm(text).replace(/[^a-z' ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  const rest = t.replace(/\b(?:hi|hii+|hello|hey|hiya|good (?:morning|afternoon|evening)|how are you(?: doing)?|how's it going|how are things|ava|eva|there|thanks|thank you|nice to meet you|i'm good|i am good|i'm fine|fine|good|ok|okay|yeah|yes)\b/g, '').trim();
+  return rest.split(' ').filter(Boolean).length <= 1;
+}
+
 export function isBookingIntent(text) {
   return /\b(?:book|appointment|schedule|see (?:a|the) doctor|check ?-?up|visit|consult)\b/.test(norm(text));
 }

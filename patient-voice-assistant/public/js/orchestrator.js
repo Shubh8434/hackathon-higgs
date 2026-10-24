@@ -12,7 +12,7 @@ import {
   parseTimes, matchSlot, isConfirmation, isBookingIntent, isPaymentDone, extractDetails,
   parseChoice, isHoldAnnouncement, extractReadback, isPayPrompt, phoneDigits, formatPhone, validPhoneDigits, cleanAddress, isAddressFollowUp,
   parseDate, parseDayPart, isoDate, parseTimeConstraint, isQuestion, dayFocus,
-  isRescheduleIntent, isCancelChange, extractBookingId, SPECIALTY_DOCTOR,
+  isRescheduleIntent, isCancelChange, extractBookingId, isSmallTalk, SPECIALTY_DOCTOR,
 } from './keywords.js';
 
 const FIELDS = ['name', 'address', 'phone'];
@@ -519,6 +519,11 @@ export class Orchestrator {
       s.awaiting = 'problem';
       return this.respond("Of course. First, can you briefly describe the problem you'd like to be seen for?");
     }
+    if (!s.doctorId && isSmallTalk(text)) {
+      return this.respond(/\bhow are you|how's it going|how are things\b/i.test(text)
+        ? "I'm great, thanks for asking! Tell me what's bothering you, and I'll find you the right doctor."
+        : "Hi there! Tell me what's bothering you, and I'll find you the right doctor.");
+    }
     if (!s.doctorId) return this.respond("I'm sorry to hear that. Could you tell me a little more about your symptoms so I can find the right doctor?");
     if (s.hold) return this.respond('Your slot is on hold. Tap Done on the payment screen to confirm it.');
     return this.respond(this.offerTimes(s.doctorId));
@@ -808,6 +813,12 @@ export class Orchestrator {
         if (flag) return this.triggerEmergency('model', flag, s.lastUserText || text);
       }
       if (s.change) return; // rescheduling is driven by the screen, not parsed from Ava
+      // Emergency bookings are free and already confirmed: if Ava talks about
+      // payment or tapping Done, correct her at once.
+      if (s.mode === 'emergency' && s.emergency && /\b(?:payment|pay|copay|tap done|press done|payment screen)\b/i.test(text)) {
+        const d = this.doctor(s.emergency.doctorId);
+        return this.respond(`Sorry, a correction: there's nothing to pay. Emergency bookings are free and already confirmed. ${d.name} is expecting you ${s.emergency.range}.`, { nudge: true });
+      }
       const normalHold = s.mode !== 'emergency' && s.hold;
       if (s.mode === 'emergency' || normalHold) {
         // Ava's read-back wins over our own transcript parsing.
@@ -909,7 +920,8 @@ export class Orchestrator {
     if (s.mode === 'emergency') {
       const b = s.emergency;
       const d = b && this.doctor(b.doctorId);
-      lines.push(`- EMERGENCY MODE. ${b ? `Emergency booking ${b.id} with ${d.name}, ${b.range} (payment waived).` : 'Reserving an emergency slot now.'}`);
+      lines.push(`- EMERGENCY MODE. ${b ? `Emergency booking ${b.id} with ${d.name}, ${b.range}.` : 'Reserving an emergency slot now.'}`);
+      lines.push('- There is NO payment for an emergency: it is free and already confirmed. There is no payment screen, no Done button and no final check. Never mention payment, a payment screen or tapping Done.');
       if (b?.triage === 'er-followup') lines.push(`- The clinic is CLOSED right now (${b.closedReason === 'sunday' ? 'Sunday' : "today's hours are over"}). Tell the patient to call 911 or go to the nearest emergency room now; the booking above is a priority FOLLOW-UP, not an appointment for today.`);
       else if (b) lines.push(`- Same-day priority slot${b.coveringFor ? ` (${d.name} is covering for ${this.doctor(b.coveringFor)?.name}, who is not in today)` : ''}. If they are in danger before then, call 911.`);
       lines.push(`- Collected: name=${s.patient.name || 'MISSING'}, address=${s.patient.address || 'MISSING'}, phone=${s.patient.phone || 'MISSING'}.`);

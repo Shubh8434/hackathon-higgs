@@ -1,7 +1,7 @@
 {
   "name": "patient-voice-assistant",
   "version": "1.0.0",
-  "description": "Voice assistant that books care and pre-empts slots for emergencies. Built on Boson AI Higgs Realtime, Avatar and TTS 3.",
+  "description": "Code Blue: a voice receptionist for clinics that books and reschedules by voice, and fast-tracks emergencies it hears mid-sentence. Built on Boson AI Higgs Realtime, STT 3.1 and TTS 3.",
   "type": "module",
   "main": "server.js",
   "engines": {

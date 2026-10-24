@@ -1,4 +1,4 @@
-// Patient Voice Assistant — backend.
+// Code Blue — backend.
 //
 // Zero npm dependencies (Node 18+ stdlib only). Responsibilities:
 //   * Hold BOSON_API_KEY and mint short-lived Realtime client secrets.
@@ -271,7 +271,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n  Patient Voice Assistant running at http://localhost:${PORT}`);
+  console.log(`\n  Code Blue running at http://localhost:${PORT}`);
   console.log(`  API base: ${API_BASE}`);
   console.log(`  API key:  ${API_KEY ? 'configured ✓' : 'MISSING ✗  (copy .env.example to .env)'}\n`);
 });

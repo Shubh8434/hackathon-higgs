@@ -410,9 +410,12 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     const body = triage === 'same-day'
       ? `Maple Clinic EMERGENCY: ${d.name} is expecting you ${fullRange(b.date, b.time)} (priority slot). Booking ID ${b.id}. If symptoms worsen, call 911 immediately.`
       : `Maple Clinic EMERGENCY: The clinic is closed now. Call 911 or go to the nearest emergency room immediately. Priority follow-up booked with ${d.name}, ${fullRange(b.date, b.time)}. Booking ID ${b.id}.`;
-    const alert = sendSms('patient', body, 'emergency');
+    // The confirmation text goes out once Ava has the patient's name, address
+    // and phone (the moment she confirms the booking), not before.
+    b.pendingSms = body;
+    const alert = detailsComplete(b) ? flushEmergencySms(b) : null;
     record('emergency', b, {
-      sms: alert.body,
+      sms: alert?.body,
       triage, closedReason, coveringFor,
       displaced: displaced ? { bookingId: displaced.id, patient: displaced.patient.name, from: fullRange(displaced.displacedFrom.date, displaced.displacedFrom.time), to: fullRange(displaced.date, displaced.time) } : null,
     });
@@ -445,6 +448,14 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     return moved;
   }
 
+  const detailsComplete = (b) => ['name', 'address', 'phone'].every((k) => b.patient?.[k]);
+
+  function flushEmergencySms(b) {
+    const msg = sendSms('patient', b.pendingSms, 'emergency');
+    delete b.pendingSms;
+    return msg;
+  }
+
   function updatePatient(id, patient = {}) {
     const b = bookings.get(id);
     if (!b) throw httpError(404, 'Booking not found');
@@ -454,7 +465,10 @@ export function createDb({ now = () => Date.now(), onRecord = null, idTaken = ()
     }
     const changed = ['name', 'phone', 'address'].filter((k) => b.patient[k] !== before[k]);
     // Saved to the bookings database only; too noisy for the dashboard log.
-    if (changed.length) record('details', b, { changed });
+    if (changed.length) {
+      const sms = b.pendingSms && detailsComplete(b) ? flushEmergencySms(b) : null;
+      record('details', b, { changed, sms: sms?.body });
+    }
     return b;
   }
 

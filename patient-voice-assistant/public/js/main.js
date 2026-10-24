@@ -13,7 +13,7 @@ import {
 } from './ui.js';
 
 const PATIENT_VOICE = 'marcus'; // voice used to "speak" demo phrases into the session
-const WELCOME = "Hi, I'm Ava, your booking assistant. How can I help today?";
+const WELCOME = "Hi, I'm Ava from Maple Clinic. How can I help you?";
 
 const voice = new AssistantVoice();
 let clockOffset = 0; // server now - client now
@@ -517,8 +517,9 @@ function drawCalendar() {
 }
 
 function updateClock() {
-  $('#clock').textContent = new Date(Date.now() + clockOffset)
-    .toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const now = new Date(Date.now() + clockOffset);
+  $('#clock').textContent = now.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  $('#phoneTime').textContent = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).replace(/\s?[AP]M$/i, '');
 }
 
 // While the payment screen is up the conversation waits: mic, demo phrases and
@@ -685,6 +686,8 @@ async function boot() {
     setConvId(null);
   }
   refreshHistory();
+  // Only offer the backup video if one has been recorded.
+  fetch('/backup/backup-demo.mp4', { method: 'HEAD' }).then((r) => $('#backupBtn').classList.toggle('hidden', !r.ok)).catch(() => {});
   await poll();
   setInterval(poll, 3000);
   setInterval(characterLoop, 100);

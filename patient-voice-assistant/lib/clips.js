@@ -7,7 +7,7 @@ import path from 'node:path';
 // Short lines (~2-3 s of speech each). Kept generic so one render is reusable
 // for every booking; the cards on screen show the specific time.
 export const CLIPS = {
-  welcome: "Hi, I'm Ava, your booking assistant. How can I help today?",
+  welcome: "Hi, I'm Ava from Maple Clinic. How can I help you?",
   emergency: "We're getting you help immediately. Stay with me.",
   confirmed: 'Your appointment is booked. Check your phone for details.',
 };
